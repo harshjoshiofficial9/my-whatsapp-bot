@@ -2,3 +2,7 @@ node_modules/
 auth_info_baileys/
 .DS_Store
 .env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

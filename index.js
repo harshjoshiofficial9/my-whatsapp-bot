@@ -2,6 +2,8 @@ import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import Groq from 'groq-sdk';
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
+import { LeadDB } from './database.js';
+import { startCrmServer } from './crmServer.js';
 
 // ============================================================
 // 🧠 AI SETUP (Groq 120B — 14,400 Free Requests/Day)
@@ -782,8 +784,12 @@ function startCleanupScheduler() {
 }
 
 // ============================================================
-// 🤖 WHATSAPP BOT — MAIN FUNCTION
+// 🤖 WHATSAPP BOT & CRM INTEGRATION
 // ============================================================
+
+let activeSock = null;
+let latestQrCode = null;
+let isConnected = false;
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -796,23 +802,30 @@ async function startBot() {
         generateHighQualityLinkPreview: true,
     });
 
+    activeSock = sock;
+
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
         const { connection, qr } = update;
         if (qr) {
-            console.log('\n📱 Is QR Code ko scan karein:\n');
+            latestQrCode = qr;
+            isConnected = false;
+            console.log('\n📱 Naya QR Code CRM Dashboard aur Terminal par available hai:\n');
             qrcode.generate(qr, { small: true });
         }
         if (connection === 'close') {
+            isConnected = false;
             console.log('⚠️ Connection drop hua, 5 sec mein wapas connect...');
             setTimeout(() => startBot(), 5000);
         } else if (connection === 'open') {
+            isConnected = true;
+            latestQrCode = null;
             console.log('\n✅ College Vidya Advisor Bot ACTIVE hai! 🎓');
             console.log('   Follow-up Engine: ON');
             console.log('   Ghost Detection: ON');
-            console.log('   Business Hours: 9 AM - 9 PM IST');
-            console.log('   Admin Alerts: ' + ADMIN_NUMBER);
+            console.log('   Groq 120B AI: ON');
+            console.log('   CRM Dashboard: http://localhost:' + (process.env.PORT || 3000));
             console.log('');
 
             // Start background schedulers
@@ -839,11 +852,20 @@ async function startBot() {
 
         const senderID = msg.key.remoteJid;
 
-        // Skip admin's own messages (don't treat as lead)
-        // (Admin can still message bot for testing — remove this if needed)
-
-        // ========== STEP 1: LEAD MANAGEMENT ==========
+        // ========== STEP 1: LEAD & DATABASE MANAGEMENT ==========
         const lead = getOrCreateLead(senderID);
+
+        // Save incoming user message to SQLite CRM database
+        LeadDB.upsert(senderID, { last_active_at: Date.now() });
+        LeadDB.addMessage(senderID, 'user', textMessage);
+
+        // Check if Human Advisor has taken over this student
+        const dbLead = LeadDB.get(senderID);
+        if (dbLead && dbLead.ai_autopilot === false) {
+            console.log(`\n📩 Message from ${dbLead.name || senderID}: "${textMessage}"`);
+            console.log(`   👤 MANUAL TAKEOVER MODE: Bot staying silent. Human advisor will reply.`);
+            return;
+        }
 
         // ========== STEP 2: CANCEL PENDING FOLLOW-UPS (Lead replied!) ==========
         cancelAllFollowUps(senderID);
@@ -858,12 +880,11 @@ async function startBot() {
             time: Date.now(),
             isFollowUp: false,
         });
-        // Keep only last 20 messages
         if (lead.conversationLog.length > 20) {
             lead.conversationLog = lead.conversationLog.slice(-20);
         }
 
-        console.log(`\n📩 Message from ${lead.naam || senderID}: "${textMessage}"`);
+        console.log(`\n📩 Message from ${lead.naam || dbLead?.name || senderID}: "${textMessage}"`);
         console.log(`   Stage: ${lead.stage} | Ghost: ${lead.isGhost} | Follow-ups sent: ${lead.followUpCount}`);
 
         // ========== STEP 5: AI REPLY (Groq with Full History) ==========
@@ -896,7 +917,7 @@ async function startBot() {
             // Send reply
             await sock.sendMessage(senderID, { text: advisorReply });
 
-            // Log bot reply to conversation history
+            // Log bot reply to in-memory history and SQLite CRM database
             lead.conversationLog.push({
                 role: 'bot',
                 text: advisorReply,
@@ -907,6 +928,7 @@ async function startBot() {
                 lead.conversationLog = lead.conversationLog.slice(-20);
             }
 
+            LeadDB.addMessage(senderID, 'bot', advisorReply);
             lead.lastBotReplyTime = Date.now();
             console.log(`   ✅ Reply sent: "${advisorReply.substring(0, 80)}..."`);
 
@@ -915,6 +937,21 @@ async function startBot() {
                 extractLeadInfo(lead),
                 detectAndUpdateStage(lead),
             ]).then(() => {
+                // Sync updated lead details to SQLite CRM
+                LeadDB.upsert(senderID, {
+                    name: lead.naam || dbLead?.name || null,
+                    sector: lead.sector || dbLead?.sector || null,
+                    location: lead.location || dbLead?.location || null,
+                    qualification: lead.qualification || dbLead?.qualification || null,
+                    percentage: lead.percentage || dbLead?.percentage || null,
+                    motivation: lead.motivation || dbLead?.motivation || null,
+                    recommended_univ: lead.recommendedUniv || dbLead?.recommended_univ || null,
+                    stage: lead.stage || 'NEW',
+                    is_ghost: lead.isGhost ? 1 : 0,
+                    ghost_stage: lead.ghostStage || null,
+                    follow_up_count: lead.followUpCount || 0
+                });
+
                 // ========== STEP 7: START GHOST DETECTION TIMER ==========
                 startGhostDetection(senderID, sock);
             });
@@ -930,9 +967,17 @@ async function startBot() {
 }
 
 // ============================================================
-// 🚀 START THE BOT
+// 🚀 START CRM SERVER & BOT
 // ============================================================
-console.log('🔄 College Vidya Advisor Bot starting...');
-console.log('   Phase 1A: Follow-Up Engine + Ghost Detection + AI Analysis');
-console.log('');
+console.log('🔄 Starting College Vidya Advisor Bot & CRM Dashboard...');
+
+// Start the Web CRM Server
+startCrmServer({
+    getSock: () => activeSock,
+    getLatestQr: () => latestQrCode,
+    isBotConnected: () => isConnected,
+    generateFollowUp: generateFollowUpMessage
+});
+
+// Start the WhatsApp Baileys Bot
 startBot();
