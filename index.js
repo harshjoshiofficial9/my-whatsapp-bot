@@ -1,12 +1,14 @@
 import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 import qrcode from 'qrcode-terminal';
 import 'dotenv/config';
 
 // ============================================================
-// 🧠 AI SETUP
+// 🧠 AI SETUP (Groq 120B — 14,400 Free Requests/Day)
 // ============================================================
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const AI_MODEL = 'openai/gpt-oss-120b';
+const FAST_MODEL = 'qwen/qwen3.8-27b';
 
 // ============================================================
 // ⏰ TIME CONSTANTS
@@ -213,6 +215,12 @@ Hamesha response ke end mein ek soft/hard close do:
 - Kabhi ek se zyada university ek saath mat recommend kar bina clear reasoning ke.
 - Student ki eligibility check kiye bina kabhi university suggest mat kar.
 
+## 🚫 STRICT ANTI-REPETITION & MEMORY RULES (MOST IMPORTANT):
+1. Pehle CHAT HISTORY ko dhyan se padho!
+2. Agar student ne apni qualification, percentage, location, ya sector ALREADY bata diya hai (chahe pichle messages mein bataya ho), toh usko DOBARA KABHI MAT POOCHO!
+3. Agar student ne bola "50% thi" ya koi direct answer/sawaal pucha hai, toh PEHLE us sawaal/score ka clear direct jawab do! (e.g. "Great! 50% score par aap Sanskriti aur Kalinga dono mein eligible ho...")
+4. Kabhi sawaalon ke loop mein mat phanso. Agar basic info (sector, % etc.) mil chuki hai toh turant university pitch karo aur aage process samjhao!
+
 ## Response Style:
 - Hinglish mein baat kar (Hindi + English natural mix)
 - Short, clear paragraphs — WhatsApp pe long walls of text mat bhej
@@ -266,21 +274,8 @@ function getOrCreateLead(senderID) {
 }
 
 // ============================================================
-// 💬 CHAT SESSIONS (AI Conversation Memory)
+// 💬 CHAT CONVERSATION MEMORY (Directly via lead.conversationLog)
 // ============================================================
-const userChats = new Map(); // Map<senderID, ChatSession>
-
-function getOrCreateChat(senderID) {
-    if (!userChats.has(senderID)) {
-        const model = genAI.getGenerativeModel({
-            model: "gemini-3.5-flash",
-            systemInstruction: SYSTEM_INSTRUCTION,
-        });
-        const chat = model.startChat({ history: [] });
-        userChats.set(senderID, chat);
-    }
-    return userChats.get(senderID);
-}
 
 // ============================================================
 // ⏰ BUSINESS HOURS ENGINE
@@ -488,8 +483,6 @@ async function executeFollowUp(senderID, sock, followUpIndex, ghostStage) {
  * Uses lead profile + conversation history + strategy directive.
  */
 async function generateFollowUpMessage(lead, followUpIndex, strategy) {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-
     // Build recent conversation context (last 6 messages)
     const recentChat = lead.conversationLog
         .slice(-6)
@@ -530,14 +523,22 @@ STRICT RULES:
 
 SIRF FOLLOW-UP MESSAGE LIKHO (nothing else):`;
 
-    const result = await model.generateContent(prompt);
-    let message = result.response.text().trim();
+    try {
+        const completion = await groq.chat.completions.create({
+            model: AI_MODEL,
+            messages: [{ role: 'system', content: prompt }],
+            temperature: 0.7,
+            max_tokens: 300,
+        });
 
-    // Clean up any accidental AI artifacts
-    message = message.replace(/^(Follow-up:|Message:|Reply:|FU-\d+:)\s*/i, '');
-    message = message.replace(/^["']|["']$/g, ''); // Remove wrapping quotes
-
-    return message;
+        let message = completion.choices[0]?.message?.content?.trim() || "";
+        message = message.replace(/^(Follow-up:|Message:|Reply:|FU-\d+:)\s*/i, '');
+        message = message.replace(/^["']|["']$/g, '');
+        return message;
+    } catch (e) {
+        console.error("Groq follow-up generation error:", e.message);
+        return `Hi ${lead.naam || ""}! Bas ek quick check-in tha College Vidya se. Koi sawaal hai toh bejhijhak poochhein! 😊`;
+    }
 }
 
 // ============================================================
@@ -549,8 +550,6 @@ SIRF FOLLOW-UP MESSAGE LIKHO (nothing else):`;
  * Runs asynchronously after each message exchange (doesn't block reply).
  */
 async function detectAndUpdateStage(lead) {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-
     const recentChat = lead.conversationLog
         .slice(-10)
         .map(m => `${m.role === 'user' ? 'Lead' : 'Advisor'}: ${m.text}`)
@@ -581,8 +580,14 @@ ${recentChat}
 Sirf ek word mein stage likho (e.g., PITCHED). Koi explanation nahi:`;
 
     try {
-        const result = await model.generateContent(prompt);
-        const detectedStage = result.response.text().trim().toUpperCase().replace(/[^A-Z_]/g, '');
+        const completion = await groq.chat.completions.create({
+            model: FAST_MODEL,
+            messages: [{ role: 'system', content: prompt }],
+            temperature: 0.1,
+            max_tokens: 30,
+        });
+
+        const detectedStage = (completion.choices[0]?.message?.content || "").trim().toUpperCase().replace(/[^A-Z_]/g, '');
 
         if (VALID_STAGES.includes(detectedStage) && detectedStage !== lead.stage) {
             const oldStage = lead.stage;
@@ -599,8 +604,6 @@ Sirf ek word mein stage likho (e.g., PITCHED). Koi explanation nahi:`;
  * Runs asynchronously — updates lead profile with any new info found.
  */
 async function extractLeadInfo(lead) {
-    const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-
     const recentChat = lead.conversationLog
         .slice(-10)
         .map(m => `${m.role === 'user' ? 'Lead' : 'Advisor'}: ${m.text}`)
@@ -629,16 +632,18 @@ Rules:
 JSON:`;
 
     try {
-        const result = await model.generateContent(prompt);
-        let jsonStr = result.response.text().trim();
+        const completion = await groq.chat.completions.create({
+            model: FAST_MODEL,
+            messages: [{ role: 'system', content: prompt }],
+            temperature: 0.1,
+            max_tokens: 150,
+            response_format: { type: "json_object" }
+        });
 
-        // Clean markdown code blocks
-        jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
+        let jsonStr = completion.choices[0]?.message?.content?.trim() || "{}";
         const info = JSON.parse(jsonStr);
         let updated = false;
 
-        // Update only non-null, newly discovered fields
         if (info.naam && info.naam !== "null" && info.naam !== null) { lead.naam = info.naam; updated = true; }
         if (info.sector && info.sector !== "null" && info.sector !== null) { lead.sector = info.sector; updated = true; }
         if (info.location && info.location !== "null" && info.location !== null) { lead.location = info.location; updated = true; }
@@ -651,7 +656,6 @@ JSON:`;
             console.log(`📋 Lead info extracted: ${lead.naam || '?'} | ${lead.sector || '?'} | ${lead.location || '?'} | ${lead.percentage || '?'}%`);
         }
     } catch (error) {
-        // JSON parse failure is common — silently ignore
         if (!error.message.includes('JSON')) {
             console.error(`⚠️ Info extraction error: ${error.message}`);
         }
@@ -862,16 +866,29 @@ async function startBot() {
         console.log(`\n📩 Message from ${lead.naam || senderID}: "${textMessage}"`);
         console.log(`   Stage: ${lead.stage} | Ghost: ${lead.isGhost} | Follow-ups sent: ${lead.followUpCount}`);
 
-        // ========== STEP 5: AI REPLY ==========
+        // ========== STEP 5: AI REPLY (Groq with Full History) ==========
         try {
             // Show typing
             await sock.presenceSubscribe(senderID);
             await sock.sendPresenceUpdate('composing', senderID);
 
-            // Get/create chat session
-            const chat = getOrCreateChat(senderID);
-            const result = await chat.sendMessage(textMessage);
-            const advisorReply = result.response.text();
+            // Format message history for Groq — includes ALL past conversation turns
+            const groqMessages = [
+                { role: 'system', content: SYSTEM_INSTRUCTION },
+                ...lead.conversationLog.map(m => ({
+                    role: m.role === 'bot' ? 'assistant' : 'user',
+                    content: m.text
+                }))
+            ];
+
+            const completion = await groq.chat.completions.create({
+                model: AI_MODEL,
+                messages: groqMessages,
+                temperature: 0.65,
+                max_tokens: 600,
+            });
+
+            const advisorReply = completion.choices[0]?.message?.content || "";
 
             // Stop typing
             await sock.sendPresenceUpdate('paused', senderID);
@@ -879,7 +896,7 @@ async function startBot() {
             // Send reply
             await sock.sendMessage(senderID, { text: advisorReply });
 
-            // Log bot reply
+            // Log bot reply to conversation history
             lead.conversationLog.push({
                 role: 'bot',
                 text: advisorReply,
@@ -894,29 +911,20 @@ async function startBot() {
             console.log(`   ✅ Reply sent: "${advisorReply.substring(0, 80)}..."`);
 
             // ========== STEP 6: BACKGROUND AI ANALYSIS (non-blocking) ==========
-            // These run in parallel, don't block the reply
             Promise.allSettled([
                 extractLeadInfo(lead),
                 detectAndUpdateStage(lead),
             ]).then(() => {
                 // ========== STEP 7: START GHOST DETECTION TIMER ==========
-                // Only after stage is updated, so correct ghost config is used
                 startGhostDetection(senderID, sock);
             });
 
         } catch (error) {
-            console.error(`   ⚠️ Error: ${error.message}`);
+            console.error(`   ⚠️ Groq Error: ${error.message}`);
 
-            if (error.message.includes('404') || error.message.includes('not found')) {
-                userChats.delete(senderID);
-                await sock.sendMessage(senderID, {
-                    text: '🔄 Ek second, system refresh ho raha hai. Please apna message dobara bhejein.'
-                });
-            } else {
-                await sock.sendMessage(senderID, {
-                    text: '⚠️ Abhi thoda technical issue aa raha hai. Main 2 minute mein wapas available hota hoon.'
-                });
-            }
+            await sock.sendMessage(senderID, {
+                text: '⚠️ Abhi technical issue aa raha hai. Main 1 minute mein wapas available hota hoon.'
+            });
         }
     });
 }
