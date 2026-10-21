@@ -734,16 +734,7 @@ function startCleanupScheduler() {
             if (lead.isDead && (now - lead.lastActiveTime) > 30 * DAY) {
                 cancelAllFollowUps(id);
                 leadProfiles.delete(id);
-                userChats.delete(id);
                 console.log(`🧹 Cleaned 30-day dead lead: ${lead.naam || id}`);
-            }
-        }
-
-        // Clean orphan chat sessions (no lead profile)
-        for (const [id] of userChats.entries()) {
-            const lead = leadProfiles.get(id);
-            if (lead && lead.isDead && (now - lead.lastActiveTime) > TWELVE_HOURS) {
-                userChats.delete(id);
             }
         }
     }, 1 * HOUR); // Run every hour
