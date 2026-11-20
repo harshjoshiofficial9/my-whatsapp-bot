@@ -544,20 +544,21 @@
       location.reload();
     }
 
+    let autoOpenedQrOnce = false;
     async function startAppPolling() {
       await fetchLeads();
       await fetchStats();
-      await checkConnectionBadge();
+      await checkConnectionBadge(true);
       setInterval(async () => {
         await fetchLeads(false);
-        await checkConnectionBadge();
+        await checkConnectionBadge(false);
         if (activeLeadPhone && currentTab === 'chat') {
           await loadMessages(activeLeadPhone, false);
         }
       }, 4500);
     }
 
-    async function checkConnectionBadge() {
+    async function checkConnectionBadge(isInitial = false) {
       try {
         const res = await fetch('/api/qr');
         if (!res.ok) return;
@@ -570,6 +571,10 @@
         } else {
           dot.className = 'w-2 h-2 rounded-full bg-amber-500';
           txt.innerText = data.status || 'Disconnected';
+          if ((isInitial || location.search.includes('qr=1')) && !autoOpenedQrOnce) {
+            autoOpenedQrOnce = true;
+            openQrModal();
+          }
         }
       } catch {}
     }
@@ -1049,22 +1054,32 @@
       openChatForLead(activeLeadPhone);
     }
 
+    let qrPollTimer = null;
     async function openQrModal() {
       document.getElementById('qr-modal').classList.remove('hidden');
-      const container = document.getElementById('qr-image-container');
-      const res = await fetch('/api/qr');
-      const data = await res.json();
-      document.getElementById('qr-last-connected').innerText = data.lastConnectedAt
-        ? 'Last connected: ' + new Date(data.lastConnectedAt).toLocaleString('en-IN')
-        : 'Status: ' + data.status;
+      await refreshQrModalContent();
+      if (qrPollTimer) clearInterval(qrPollTimer);
+      qrPollTimer = setInterval(refreshQrModalContent, 3000);
+    }
 
-      if (data.status === 'CONNECTED') {
-        container.innerHTML = '<div class="text-emerald-600 font-bold text-sm"><i class="fa-solid fa-circle-check text-3xl block mb-2"></i>WhatsApp Connected & Active!</div>';
-      } else if (data.qrDataUrl) {
-        container.innerHTML = `<img src="${data.qrDataUrl}" alt="QR" class="w-52 h-52 rounded-lg border">`;
-      } else {
-        container.innerHTML = `<p class="text-xs text-slate-500">Status: ${data.status}. Waiting for QR or enter phone number below for pairing code.</p>`;
-      }
+    async function refreshQrModalContent() {
+      const container = document.getElementById('qr-image-container');
+      try {
+        const res = await fetch('/api/qr');
+        const data = await res.json();
+        document.getElementById('qr-last-connected').innerText = data.lastConnectedAt
+          ? 'Last connected: ' + new Date(data.lastConnectedAt).toLocaleString('en-IN')
+          : 'Status: ' + data.status;
+
+        if (data.status === 'CONNECTED') {
+          container.innerHTML = '<div class="text-emerald-600 font-bold text-sm"><i class="fa-solid fa-circle-check text-3xl block mb-2"></i>WhatsApp Connected & Active!</div>';
+          if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; }
+        } else if (data.qrDataUrl) {
+          container.innerHTML = `<img src="${data.qrDataUrl}" alt="QR" class="w-52 h-52 rounded-lg border">`;
+        } else {
+          container.innerHTML = `<p class="text-xs text-slate-500">Status: ${data.status}. Generating QR code... (or enter phone number below for 8-digit pairing code)</p>`;
+        }
+      } catch {}
     }
 
     async function requestPairingCode() {
@@ -1084,6 +1099,7 @@
 
     function closeQrModal() {
       document.getElementById('qr-modal').classList.add('hidden');
+      if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; }
     }
 
     function exportToCsv() {
