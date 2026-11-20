@@ -4,9 +4,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 import { LeadDB, STORAGE_PATHS } from './database.js';
+import { KnowledgeRAG } from './knowledgeRag.js';
 import { inferFromUserText, evaluateEligibility, computeStageAndScore } from './eligibilityEngine.js';
 import { generateCounselorTurn, generateContextualFollowUp } from './llmBrain.js';
-import { sendSingleBubbleWithRetry, processStudentTurn } from './conversationController.js';
+import { sendSingleBubbleWithRetry, handleIncomingMessage } from './conversationController.js';
 import { HOUR } from './followupEngine.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -29,7 +30,6 @@ function verifySessionToken(token) {
   const [user, ts, sig] = parts;
   const expected = crypto.createHmac('sha256', SESSION_SECRET).update(`${user}.${ts}`).digest('hex');
   if (sig !== expected) return false;
-  // Valid for 14 days
   if (Date.now() - Number(ts) > 14 * 24 * 3600 * 1000) return false;
   return true;
 }
@@ -54,17 +54,22 @@ export function startCrmServer({
   const app = express();
   const PORT = process.env.PORT || 3000;
 
-  app.use(express.json({ limit: '5mb' }));
+  app.use(express.json({ limit: '15mb' }));
 
-  // Public Healthcheck endpoint (Phase 6)
+  // Section 3.4: Fast Public /health endpoint for Render.com healthchecks
   app.get('/health', (req, res) => {
     const conn = getConnectionInfo ? getConnectionInfo() : { status: 'UNKNOWN' };
+    const kList = KnowledgeRAG.listDocs();
     res.json({
       status: 'ok',
+      wa_connected: conn.status === 'CONNECTED',
       whatsapp: conn.status,
+      db_ok: true,
+      knowledge_docs: kList.total_docs,
+      knowledge_words: kList.total_words,
+      uptime_sec: Math.round(process.uptime()),
       lastConnectedAt: conn.lastConnectedAt || null,
-      dbPath: STORAGE_PATHS.dbPath,
-      uptimeSeconds: Math.round(process.uptime())
+      dbPath: STORAGE_PATHS.dbPath
     });
   });
 
@@ -90,10 +95,8 @@ export function startCrmServer({
     res.json({ authenticated, username: authenticated ? CRM_USERNAME : null });
   });
 
-  // Serve static frontend assets (login modal handles unauthenticated state cleanly)
   app.use(express.static(path.join(__dirname, 'public')));
 
-  // Auth Middleware for all protected /api/* and /uploads/* routes
   const requireAuth = (req, res, next) => {
     const cookies = parseCookies(req.headers.cookie);
     const authHeader = req.headers.authorization || '';
@@ -110,8 +113,7 @@ export function startCrmServer({
   // API: Get all leads
   app.get('/api/leads', (req, res) => {
     try {
-      const leads = LeadDB.getAll();
-      res.json(leads);
+      res.json(LeadDB.getAll());
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -124,13 +126,14 @@ export function startCrmServer({
       LeadDB.markReadOnDashboard(phone);
       const messages = LeadDB.getMessages(phone, 100);
       const followups = LeadDB.getPendingFollowUpJobsForLead(phone);
-      res.json({ messages, followups });
+      const lead = LeadDB.get(phone);
+      res.json({ messages, followups, lead });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // API: Update lead profile, stage, AI/Human mode, notes, tags, checklist
+  // API: Update lead profile
   app.patch('/api/leads/:phone', (req, res) => {
     try {
       const phone = req.params.phone;
@@ -159,7 +162,6 @@ export function startCrmServer({
       if (!text) return res.status(400).json({ error: 'Text is required' });
 
       const phone = LeadDB.normalizePhoneJid(req.params.phone);
-      // Automatically switch lead to HUMAN mode for 12h when human sends a message
       LeadDB.upsert(phone, { ai_mode: 'HUMAN', human_until: Date.now() + 12 * HOUR });
       LeadDB.cancelFollowUpJobs(phone);
 
@@ -177,13 +179,13 @@ export function startCrmServer({
     }
   });
 
-  // API: "✨ AI Suggest Reply" button for Human Mode (drafts reply without sending)
+  // API: "✨ AI Suggest Reply" button for Human Mode
   app.post('/api/leads/:phone/suggest', async (req, res) => {
     try {
       const phone = LeadDB.normalizePhoneJid(req.params.phone);
       const lead = LeadDB.getOrCreate(phone);
-      const messages = LeadDB.getMessages(phone, 20);
-      const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')?.text || 'Hello';
+      const mergedTurns = LeadDB.getMergedConversationTurns(phone, 12);
+      const lastUserMsg = [...mergedTurns].reverse().find(m => m.role === 'user')?.content || 'Hello';
 
       const { updates, meta } = inferFromUserText(lastUserMsg, lead);
       const mergedLead = { ...lead, ...updates };
@@ -194,7 +196,7 @@ export function startCrmServer({
       const turnResult = await generateCounselorTurn({
         userText: lastUserMsg,
         lead: mergedLead,
-        conversationHistory: messages,
+        mergedHistoryTurns: mergedTurns,
         eligibilityResult,
         stageInfo,
         kb,
@@ -204,6 +206,8 @@ export function startCrmServer({
       res.json({
         suggestedText: turnResult.messages.join('\n\n'),
         bubbles: turnResult.messages,
+        thought: turnResult.thought,
+        detected_intent: turnResult.detected_intent,
         eligibilityResult
       });
     } catch (err) {
@@ -254,7 +258,6 @@ export function startCrmServer({
     }
   });
 
-  // API: Get all pending follow-up jobs
   app.get('/api/followups', (req, res) => {
     try {
       res.json(LeadDB.getAllPendingFollowUpJobs());
@@ -263,7 +266,7 @@ export function startCrmServer({
     }
   });
 
-  // API: Knowledge Base Get & Update
+  // API: University Knowledge Base Config (`knowledge_base.json`)
   app.get('/api/kb', (req, res) => {
     try {
       res.json(LeadDB.getKnowledgeBase());
@@ -281,15 +284,87 @@ export function startCrmServer({
     }
   });
 
-  // API: Dashboard Test Chat Simulator (Phase 7)
+  // ============================================================
+  // 📚 SECTION 3.3 — FTS5 KNOWLEDGE LIBRARY & RAG API ENDPOINTS
+  // ============================================================
+  app.get('/api/knowledge', (req, res) => {
+    try {
+      res.json(KnowledgeRAG.listDocs());
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/knowledge/:docId', (req, res) => {
+    try {
+      const doc = KnowledgeRAG.getDoc(req.params.docId);
+      if (!doc) return res.status(404).json({ error: 'Document not found' });
+      res.json(doc);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/knowledge', (req, res) => {
+    try {
+      const { doc_id, title, tags, category, summary, content } = req.body || {};
+      if (!content) return res.status(400).json({ error: 'Content is required' });
+      const doc = KnowledgeRAG.indexDocumentInDb({
+        doc_id: doc_id || title || `doc_${Date.now()}`,
+        title: title || doc_id,
+        tags: tags || '',
+        category: category || 'Career Guidance',
+        summary: summary || title || '',
+        content
+      }, true);
+      res.json({ success: true, doc, library: KnowledgeRAG.listDocs() });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/knowledge/:docId', (req, res) => {
+    try {
+      const result = KnowledgeRAG.deleteDoc(req.params.docId);
+      res.json({ ...result, library: KnowledgeRAG.listDocs() });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/knowledge/search', (req, res) => {
+    try {
+      const { query, qualification, stream_branch, employment_type, goal } = req.body || {};
+      const result = KnowledgeRAG.retrieveTopChunks({
+        userText: query || '',
+        lead: { qualification, stream_branch, employment_type, goal },
+        topK: 2,
+        maxTokens: 480
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ============================================================
+  // 🧪 SECTION 2.2 — UNIFIED SIMULATOR ENDPOINT (SHARES handleIncomingMessage)
+  // ============================================================
   app.post('/api/simulator/chat', async (req, res) => {
     try {
-      const { phone = '919999900001@s.whatsapp.net', text, reset = false } = req.body || {};
+      const {
+        phone = '919999900001@s.whatsapp.net',
+        text,
+        reset = false,
+        debounceMs = 2500
+      } = req.body || {};
       const norm = LeadDB.normalizePhoneJid(phone);
 
       if (reset) {
+        LeadDB.clearMessages(norm);
+        LeadDB.cancelFollowUpJobs(norm);
         LeadDB.upsert(norm, {
-          name: 'Test Student',
+          name: null,
           city: null,
           state: null,
           distance_km_from_campus: null,
@@ -303,22 +378,28 @@ export function startCrmServer({
           goal: null,
           budget: null,
           preferred_mode: null,
+          preferred_program: null,
           recommended_program: null,
           recommended_university: null,
+          declined_programs: [],
           objections: [],
+          conversation_mood: 'neutral',
           stage: 'NEW',
           lead_score: 10,
           ai_mode: 'AI',
           opted_out: false,
           turn_count: 0,
-          last_cta_turn: 0
+          last_cta_turn: 0,
+          last_thought: null,
+          last_reasoning: null,
+          last_intent: null,
+          last_rag_docs: []
         });
         return res.json({ reset: true, lead: LeadDB.get(norm), messages: [] });
       }
 
       if (!text) return res.status(400).json({ error: 'Text is required' });
 
-      LeadDB.addMessage(norm, 'user', text, { status: 'RECEIVED' });
       const simSentBubbles = [];
       const mockGetSock = () => ({
         readMessages: async () => {},
@@ -330,35 +411,48 @@ export function startCrmServer({
         }
       });
 
-      const result = await processStudentTurn({
+      const result = await handleIncomingMessage({
         phone: norm,
-        combinedText: text,
-        incomingKeys: [],
+        text,
+        source: 'simulator',
         getSock: mockGetSock,
         sendOwnerAlertFn: async () => {},
         isGlobalAiPaused: false,
+        debounceMs: Number(debounceMs),
         skipDelays: true
       });
 
       res.json({
+        skipped: result.skipped || false,
+        staleCancelled: result.staleCancelled || false,
         bubbles: simSentBubbles,
-        lead: result.lead,
-        eligibilityResult: result.eligibilityResult,
-        stageInfo: result.stageInfo,
-        messages: LeadDB.getMessages(norm, 50)
+        lead: LeadDB.get(norm),
+        eligibilityResult: result.eligibilityResult || null,
+        stageInfo: result.stageInfo || null,
+        turnResult: result.turnResult || null,
+        messages: LeadDB.getMessages(norm, 50),
+        quota: LeadDB.getGroqQuotaMetrics()
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // API: CRM Stats & Global Pause Toggle
+  // API: CRM Stats & Live Groq Quota Meter
   app.get('/api/stats', (req, res) => {
     try {
       res.json({
         ...LeadDB.getStats(),
         globalAiPaused: isGlobalAiPausedFn ? isGlobalAiPausedFn() : false
       });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/quota', (req, res) => {
+    try {
+      res.json(LeadDB.getGroqQuotaMetrics());
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -376,8 +470,8 @@ export function startCrmServer({
       const leads = LeadDB.getAll();
       const headers = [
         'Phone', 'Name', 'Qualification', 'Stream', 'Percentage', 'Employment_Type',
-        'City', 'Goal', 'Recommended_Program', 'Recommended_University', 'Stage',
-        'Lead_Score', 'AI_Mode', 'Ghost', 'Opted_Out', 'Notes', 'Created_At'
+        'City', 'Goal', 'Declined_Programs', 'Recommended_Program', 'Recommended_University',
+        'Stage', 'Lead_Score', 'AI_Mode', 'Ghost', 'Opted_Out', 'Notes', 'Created_At'
       ];
 
       const csvRows = [headers.join(',')];
@@ -391,6 +485,7 @@ export function startCrmServer({
           `"${l.employment_type || ''}"`,
           `"${(l.city || '').replace(/"/g, '""')}"`,
           `"${(l.goal || '').replace(/"/g, '""')}"`,
+          `"${(l.declined_programs || []).join(';')}"`,
           `"${(l.recommended_program || '').replace(/"/g, '""')}"`,
           `"${(l.recommended_university || '').replace(/"/g, '""')}"`,
           `"${l.stage}"`,

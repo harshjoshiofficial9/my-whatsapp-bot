@@ -7,56 +7,40 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * Resolve persistent directory for SQLite DB & Baileys Auth.
- * On Railway, /data or /app/auth_info_baileys is mounted as a persistent volume.
+ * Resolve persistent directory for SQLite DB, Baileys Auth, Knowledge Library & Uploads.
+ * On Render.com, /data is the mounted Persistent Disk. Falls back gracefully to local paths.
  */
 export function resolveStoragePaths() {
-  const envDataDir = process.env.DATA_DIR;
-  let dataDir = __dirname;
+  const hasRenderDisk = fs.existsSync('/data');
+  const baseDataDir = process.env.DATA_DIR || (hasRenderDisk ? '/data' : path.join(__dirname, 'data'));
 
-  if (envDataDir && fs.existsSync(envDataDir)) {
-    dataDir = envDataDir;
-  } else if (fs.existsSync('/data')) {
-    dataDir = '/data';
-  } else if (process.env.RAILWAY_ENVIRONMENT && fs.existsSync('/app/auth_info_baileys')) {
-    // Railway volume is mounted at /app/auth_info_baileys — store DB inside the mounted volume so redeploys never wipe it!
-    dataDir = '/app/auth_info_baileys';
-  }
-
-  const authDir = process.env.AUTH_DIR || (
-    dataDir === '/data'
-      ? path.join('/data', 'auth_info_baileys')
-      : path.join(__dirname, 'auth_info_baileys')
+  const dbPath = process.env.DB_PATH || (
+    hasRenderDisk
+      ? '/data/crm.db'
+      : (fs.existsSync(path.join(__dirname, 'crm.db')) ? path.join(__dirname, 'crm.db') : path.join(baseDataDir, 'crm.db'))
   );
 
-  const dbPath = process.env.DB_PATH || path.join(dataDir, 'crm.db');
-  const backupDir = path.join(dataDir, 'backups');
-  const uploadsDir = path.join(dataDir, 'uploads');
+  const authDir = process.env.AUTH_DIR || (
+    hasRenderDisk ? '/data/auth' : path.join(__dirname, 'auth_info_baileys')
+  );
 
-  for (const dir of [path.dirname(dbPath), authDir, backupDir, uploadsDir]) {
+  const knowledgeDir = process.env.KNOWLEDGE_DIR || path.join(baseDataDir, 'knowledge_library');
+  const uploadsDir = process.env.UPLOADS_DIR || path.join(baseDataDir, 'uploads');
+  const backupDir = path.join(baseDataDir, 'backups');
+
+  for (const dir of [baseDataDir, path.dirname(dbPath), authDir, knowledgeDir, uploadsDir, backupDir]) {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
   }
 
-  // If moving from local ./crm.db to volume dbPath for the first time, copy existing DB so no data is lost
-  const legacyDbPath = path.join(__dirname, 'crm.db');
-  if (dbPath !== legacyDbPath && !fs.existsSync(dbPath) && fs.existsSync(legacyDbPath)) {
-    try {
-      fs.copyFileSync(legacyDbPath, dbPath);
-      console.log(`📦 Migrated existing crm.db to persistent volume: ${dbPath}`);
-    } catch (e) {
-      console.error('⚠️ Legacy DB copy warning:', e.message);
-    }
-  }
-
-  return { dataDir, authDir, dbPath, backupDir, uploadsDir };
+  return { dataDir: baseDataDir, authDir, dbPath, knowledgeDir, uploadsDir, backupDir };
 }
 
 export const STORAGE_PATHS = resolveStoragePaths();
-const db = new Database(STORAGE_PATHS.dbPath);
+export const db = new Database(STORAGE_PATHS.dbPath);
 
-// Enable WAL mode & foreign keys for high concurrency and safety
+// Enable WAL mode for high concurrency and crash safety
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
@@ -81,9 +65,12 @@ db.exec(`
     goal TEXT,
     budget TEXT,
     preferred_mode TEXT,
+    preferred_program TEXT,
     recommended_program TEXT,
     recommended_university TEXT,
+    declined_programs TEXT DEFAULT '[]',
     objections TEXT DEFAULT '[]',
+    conversation_mood TEXT DEFAULT 'neutral',
     stage TEXT DEFAULT 'NEW',
     lead_score INTEGER DEFAULT 10,
     last_user_msg_at INTEGER,
@@ -103,7 +90,10 @@ db.exec(`
     last_alert_at INTEGER,
     last_cta_turn INTEGER DEFAULT 0,
     turn_count INTEGER DEFAULT 0,
-    -- Legacy columns kept in sync for backward compatibility
+    last_thought TEXT,
+    last_reasoning TEXT,
+    last_intent TEXT,
+    last_rag_docs TEXT DEFAULT '[]',
     sector TEXT,
     location TEXT,
     motivation TEXT,
@@ -124,6 +114,10 @@ db.exec(`
     media_type TEXT,
     media_path TEXT,
     raw_proto TEXT,
+    thought TEXT,
+    reasoning TEXT,
+    detected_intent TEXT,
+    rag_docs TEXT,
     created_at INTEGER
   );
 
@@ -171,13 +165,47 @@ db.exec(`
     updated_at INTEGER
   );
 
+  CREATE TABLE IF NOT EXISTS knowledge_docs (
+    doc_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    tags TEXT DEFAULT '',
+    category TEXT DEFAULT 'General',
+    summary TEXT DEFAULT '',
+    content TEXT NOT NULL,
+    word_count INTEGER DEFAULT 0,
+    chunk_count INTEGER DEFAULT 0,
+    updated_at INTEGER
+  );
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(
+    doc_id,
+    title,
+    tags,
+    category,
+    chunk_text
+  );
+
+  CREATE TABLE IF NOT EXISTS llm_telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_phone TEXT,
+    model TEXT,
+    prompt_tokens INTEGER DEFAULT 0,
+    cached_tokens INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    remaining_requests INTEGER,
+    remaining_tokens INTEGER,
+    reset_requests TEXT,
+    reset_tokens TEXT,
+    created_at INTEGER
+  );
+
   CREATE INDEX IF NOT EXISTS idx_messages_lead ON messages(lead_phone);
   CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage);
   CREATE INDEX IF NOT EXISTS idx_followup_due ON followup_jobs(status, due_at);
   CREATE INDEX IF NOT EXISTS idx_outbound_status ON outbound_queue(status);
+  CREATE INDEX IF NOT EXISTS idx_telemetry_created ON llm_telemetry(created_at);
 `);
 
-// Add any missing columns to existing `leads` or `messages` tables non-destructively
 function runMigrations() {
   const leadCols = new Set(db.prepare("PRAGMA table_info(leads)").all().map(c => c.name));
   const newLeadCols = [
@@ -193,9 +221,12 @@ function runMigrations() {
     ['goal', 'TEXT'],
     ['budget', 'TEXT'],
     ['preferred_mode', 'TEXT'],
+    ['preferred_program', 'TEXT'],
     ['recommended_program', 'TEXT'],
     ['recommended_university', 'TEXT'],
+    ['declined_programs', "TEXT DEFAULT '[]'"],
     ['objections', "TEXT DEFAULT '[]'"],
+    ['conversation_mood', "TEXT DEFAULT 'neutral'"],
     ['lead_score', 'INTEGER DEFAULT 10'],
     ['last_user_msg_at', 'INTEGER'],
     ['last_bot_msg_at', 'INTEGER'],
@@ -209,6 +240,10 @@ function runMigrations() {
     ['last_alert_at', 'INTEGER'],
     ['last_cta_turn', 'INTEGER DEFAULT 0'],
     ['turn_count', 'INTEGER DEFAULT 0'],
+    ['last_thought', 'TEXT'],
+    ['last_reasoning', 'TEXT'],
+    ['last_intent', 'TEXT'],
+    ['last_rag_docs', "TEXT DEFAULT '[]'"],
     ['sector', 'TEXT'],
     ['location', 'TEXT'],
     ['motivation', 'TEXT'],
@@ -228,7 +263,11 @@ function runMigrations() {
     ['status', "TEXT DEFAULT 'SENT'"],
     ['media_type', 'TEXT'],
     ['media_path', 'TEXT'],
-    ['raw_proto', 'TEXT']
+    ['raw_proto', 'TEXT'],
+    ['thought', 'TEXT'],
+    ['reasoning', 'TEXT'],
+    ['detected_intent', 'TEXT'],
+    ['rag_docs', 'TEXT']
   ];
 
   for (const [col, def] of newMsgCols) {
@@ -242,14 +281,22 @@ function runMigrations() {
 
 runMigrations();
 
-// Seed KB from knowledge_base.json if kb_store is empty
+// Sync KB from knowledge_base.json on first boot or if updated
 const kbFilePath = path.join(__dirname, 'knowledge_base.json');
 function seedKnowledgeBase() {
   try {
-    const existing = db.prepare('SELECT id FROM kb_store WHERE id = ?').get('main');
-    if (!existing && fs.existsSync(kbFilePath)) {
+    const existing = db.prepare('SELECT id, data FROM kb_store WHERE id = ?').get('main');
+    if (fs.existsSync(kbFilePath)) {
       const raw = fs.readFileSync(kbFilePath, 'utf8');
-      db.prepare('INSERT INTO kb_store (id, data, updated_at) VALUES (?, ?, ?)').run('main', raw, Date.now());
+      if (!existing) {
+        db.prepare('INSERT INTO kb_store (id, data, updated_at) VALUES (?, ?, ?)').run('main', raw, Date.now());
+      } else {
+        // Ensure faq_knowledge and brand exist if upgrading from earlier schema
+        const parsedExisting = JSON.parse(existing.data);
+        if (!parsedExisting.faq_knowledge || !parsedExisting.brand) {
+          db.prepare('UPDATE kb_store SET data = ?, updated_at = ? WHERE id = ?').run(raw, Date.now(), 'main');
+        }
+      }
     }
   } catch (e) {
     console.error('⚠️ KB seed error:', e.message);
@@ -257,7 +304,6 @@ function seedKnowledgeBase() {
 }
 seedKnowledgeBase();
 
-// Helper to parse JSON safely
 function safeJson(str, fallback) {
   if (!str) return fallback;
   if (typeof str === 'object') return str;
@@ -271,7 +317,6 @@ function safeJson(str, fallback) {
 function hydrateLead(row) {
   if (!row) return null;
   const now = Date.now();
-  // Auto-expire 12h human takeover if human_until has passed
   let aiMode = row.ai_mode || (row.ai_autopilot === 0 ? 'HUMAN' : 'AI');
   if (aiMode === 'HUMAN' && row.human_until && now > row.human_until) {
     aiMode = 'AI';
@@ -302,29 +347,25 @@ function hydrateLead(row) {
     ai_autopilot: aiMode === 'AI',
     opted_out: Boolean(row.opted_out),
     is_ghost: Boolean(row.is_ghost),
+    declined_programs: safeJson(row.declined_programs, []),
     objections: safeJson(row.objections, []),
     tags: safeJson(row.tags, []),
     docs_checklist: safeJson(row.docs_checklist, {}),
     docs_uploads: safeJson(row.docs_uploads, []),
+    last_rag_docs: safeJson(row.last_rag_docs, [])
   };
 }
 
-// ============================================================
-// 📦 EXPORTED DATABASE API
-// ============================================================
 export const LeadDB = {
   normalizePhoneJid(jid) {
     if (!jid) return jid;
     let clean = String(jid).trim();
-    // Strip device suffix like :38@s.whatsapp.net
     clean = clean.replace(/:\d+@/, '@');
-    // Check if it's an @lid that we already mapped
     if (clean.endsWith('@lid')) {
       const mapped = db.prepare('SELECT phone_jid FROM lid_map WHERE lid = ?').get(clean);
       if (mapped?.phone_jid) return mapped.phone_jid;
       return clean;
     }
-    // If bare phone number was passed (e.g. from CLI command /lead 919876543210)
     if (!clean.includes('@')) {
       clean = clean.replace(/\D/g, '');
       if (clean.length === 10) clean = '91' + clean;
@@ -345,7 +386,6 @@ export const LeadDB = {
       ON CONFLICT(lid) DO UPDATE SET phone_jid = excluded.phone_jid, updated_at = excluded.updated_at
     `).run(cleanLid, cleanPhone, Date.now());
 
-    // If a temporary lead was created under the @lid before mapping was known, merge it into cleanPhone
     const lidLead = db.prepare('SELECT * FROM leads WHERE phone = ?').get(cleanLid);
     if (lidLead && cleanLid !== cleanPhone) {
       const phoneLead = db.prepare('SELECT * FROM leads WHERE phone = ?').get(cleanPhone);
@@ -393,7 +433,6 @@ export const LeadDB = {
     const existing = db.prepare('SELECT * FROM leads WHERE phone = ?').get(norm);
     const now = Date.now();
 
-    // Synchronize alias fields
     const payload = { ...data };
     if (payload.naam !== undefined && payload.name === undefined) payload.name = payload.naam;
     delete payload.naam;
@@ -426,12 +465,14 @@ export const LeadDB = {
     const validColumns = new Set([
       'name', 'city', 'state', 'distance_km_from_campus', 'qualification', 'stream_branch',
       'percentage', 'category', 'employed', 'employment_type', 'work_experience_years',
-      'job_role', 'goal', 'budget', 'preferred_mode', 'recommended_program',
-      'recommended_university', 'objections', 'stage', 'lead_score', 'last_user_msg_at',
-      'last_bot_msg_at', 'ai_mode', 'human_until', 'opted_out', 'notes', 'tags',
-      'docs_checklist', 'docs_uploads', 'is_ghost', 'ghost_stage', 'follow_up_count',
-      'unread_count', 'consecutive_failures', 'last_alert_at', 'last_cta_turn', 'turn_count',
-      'sector', 'location', 'motivation', 'recommended_univ', 'ai_autopilot', 'last_active_at'
+      'job_role', 'goal', 'budget', 'preferred_mode', 'preferred_program',
+      'recommended_program', 'recommended_university', 'declined_programs', 'objections',
+      'conversation_mood', 'stage', 'lead_score', 'last_user_msg_at', 'last_bot_msg_at',
+      'ai_mode', 'human_until', 'opted_out', 'notes', 'tags', 'docs_checklist', 'docs_uploads',
+      'is_ghost', 'ghost_stage', 'follow_up_count', 'unread_count', 'consecutive_failures',
+      'last_alert_at', 'last_cta_turn', 'turn_count', 'last_thought', 'last_reasoning',
+      'last_intent', 'last_rag_docs', 'sector', 'location', 'motivation', 'recommended_univ',
+      'ai_autopilot', 'last_active_at'
     ]);
 
     if (!existing) {
@@ -457,7 +498,7 @@ export const LeadDB = {
       if (['employed', 'opted_out', 'is_ghost', 'ai_autopilot'].includes(key)) {
         updates.push(`${key} = ?`);
         values.push(val === null ? null : (val ? 1 : 0));
-      } else if (['objections', 'tags', 'docs_checklist', 'docs_uploads'].includes(key)) {
+      } else if (['declined_programs', 'objections', 'tags', 'docs_checklist', 'docs_uploads', 'last_rag_docs'].includes(key)) {
         updates.push(`${key} = ?`);
         values.push(typeof val === 'string' ? val : JSON.stringify(val));
       } else {
@@ -484,11 +525,20 @@ export const LeadDB = {
     const mediaType = options.mediaType || null;
     const mediaPath = options.mediaPath || null;
     const rawProto = options.rawProto ? JSON.stringify(options.rawProto) : null;
+    const thought = options.thought || null;
+    const reasoning = options.reasoning || null;
+    const detectedIntent = options.detectedIntent || null;
+    const ragDocs = options.ragDocs ? JSON.stringify(options.ragDocs) : null;
 
     const res = db.prepare(`
-      INSERT INTO messages (lead_phone, wa_msg_id, role, text, status, is_follow_up, media_type, media_path, raw_proto, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(norm, waMsgId, role, text, status, isFollowUp ? 1 : 0, mediaType, mediaPath, rawProto, now);
+      INSERT INTO messages (
+        lead_phone, wa_msg_id, role, text, status, is_follow_up,
+        media_type, media_path, raw_proto, thought, reasoning, detected_intent, rag_docs, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      norm, waMsgId, role, text, status, isFollowUp ? 1 : 0,
+      mediaType, mediaPath, rawProto, thought, reasoning, detectedIntent, ragDocs, now
+    );
 
     if (role === 'user') {
       db.prepare('UPDATE leads SET last_active_at = ?, last_user_msg_at = ?, unread_count = COALESCE(unread_count, 0) + 1 WHERE phone = ?').run(now, now, norm);
@@ -516,7 +566,7 @@ export const LeadDB = {
 
   getMessages(leadPhone, limit = 50) {
     const norm = this.normalizePhoneJid(leadPhone);
-    const rows = db.prepare(`
+    return db.prepare(`
       SELECT * FROM (
         SELECT * FROM messages 
         WHERE lead_phone = ? 
@@ -524,7 +574,31 @@ export const LeadDB = {
         LIMIT ?
       ) ORDER BY id ASC
     `).all(norm, limit);
-    return rows;
+  },
+
+  /**
+   * Section 2.3 & 2.6: Merge multi-bubble bot turns into a single assistant message separated by \n\n
+   * and consecutive user messages into a single user message separated by \n so the LLM clearly sees
+   * everything it already said and NEVER repeats itself!
+   */
+  getMergedConversationTurns(leadPhone, maxTurns = 12) {
+    const rawMsgs = this.getMessages(leadPhone, 35);
+    const merged = [];
+
+    for (const m of rawMsgs) {
+      const role = m.role === 'user' ? 'user' : 'assistant';
+      const text = String(m.text || '').trim();
+      if (!text) continue;
+
+      if (merged.length > 0 && merged[merged.length - 1].role === role) {
+        const sep = role === 'assistant' ? '\n\n' : '\n';
+        merged[merged.length - 1].content += `${sep}${text}`;
+      } else {
+        merged.push({ role, content: text });
+      }
+    }
+
+    return merged.slice(-maxTurns);
   },
 
   markReadOnDashboard(leadPhone) {
@@ -532,7 +606,23 @@ export const LeadDB = {
     db.prepare('UPDATE leads SET unread_count = 0 WHERE phone = ?').run(norm);
   },
 
-  // Idempotency for incoming Baileys messages
+  clearMessages(leadPhone) {
+    const norm = this.normalizePhoneJid(leadPhone);
+    const rows = db.prepare('SELECT wa_msg_id FROM messages WHERE lead_phone = ? AND wa_msg_id IS NOT NULL').all(norm);
+    for (const r of rows) {
+      db.prepare('DELETE FROM processed_msg_ids WHERE msg_id = ?').run(r.wa_msg_id);
+    }
+    db.prepare('DELETE FROM messages WHERE lead_phone = ?').run(norm);
+  },
+
+  deleteLead(leadPhone) {
+    const norm = this.normalizePhoneJid(leadPhone);
+    this.clearMessages(norm);
+    this.cancelFollowUpJobs(norm);
+    db.prepare('DELETE FROM outbound_queue WHERE lead_phone = ?').run(norm);
+    db.prepare('DELETE FROM leads WHERE phone = ?').run(norm);
+  },
+
   isMessageProcessed(msgId) {
     if (!msgId) return false;
     const row = db.prepare('SELECT msg_id FROM processed_msg_ids WHERE msg_id = ?').get(msgId);
@@ -544,7 +634,6 @@ export const LeadDB = {
     db.prepare('INSERT OR IGNORE INTO processed_msg_ids (msg_id, created_at) VALUES (?, ?)').run(msgId, Date.now());
   },
 
-  // Track bot's own sent message IDs so we can distinguish human replies from the linked phone
   markBotSentId(msgId) {
     if (!msgId) return;
     db.prepare('INSERT OR IGNORE INTO bot_sent_ids (msg_id, created_at) VALUES (?, ?)').run(msgId, Date.now());
@@ -556,7 +645,6 @@ export const LeadDB = {
     return Boolean(row);
   },
 
-  // Outbound Queue for failed / disconnected sends
   enqueueOutbound(leadPhone, text, isFollowUp = false, lastError = null) {
     const norm = this.normalizePhoneJid(leadPhone);
     const res = db.prepare(`
@@ -578,7 +666,6 @@ export const LeadDB = {
     db.prepare("UPDATE outbound_queue SET attempts = attempts + 1, last_error = ?, status = CASE WHEN attempts + 1 >= 5 THEN 'FAILED' ELSE 'QUEUED' END WHERE id = ?").run(errorMsg, id);
   },
 
-  // Persistent Follow-Up Scheduler Jobs
   scheduleFollowUpJobs(leadPhone, ghostStage, jobs) {
     const norm = this.normalizePhoneJid(leadPhone);
     this.cancelFollowUpJobs(norm);
@@ -632,7 +719,6 @@ export const LeadDB = {
     db.prepare('UPDATE followup_jobs SET status = ? WHERE id = ?').run(status, jobId);
   },
 
-  // Knowledge Base Management
   getKnowledgeBase() {
     try {
       const row = db.prepare('SELECT data FROM kb_store WHERE id = ?').get('main');
@@ -660,7 +746,76 @@ export const LeadDB = {
     return updated;
   },
 
-  // Stats & Analytics
+  // Record Groq LLM Telemetry & Rate Limit Headers (Section 2.6)
+  recordLlmTelemetry({
+    leadPhone = null,
+    model = 'openai/gpt-oss-120b',
+    promptTokens = 0,
+    cachedTokens = 0,
+    completionTokens = 0,
+    remainingRequests = null,
+    remainingTokens = null,
+    resetRequests = null,
+    resetTokens = null
+  }) {
+    db.prepare(`
+      INSERT INTO llm_telemetry (
+        lead_phone, model, prompt_tokens, cached_tokens, completion_tokens,
+        remaining_requests, remaining_tokens, reset_requests, reset_tokens, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      leadPhone, model, promptTokens, cachedTokens, completionTokens,
+      remainingRequests !== null ? Number(remainingRequests) : null,
+      remainingTokens !== null ? Number(remainingTokens) : null,
+      resetRequests, resetTokens, Date.now()
+    );
+  },
+
+  getGroqQuotaMetrics() {
+    // Daily reset is 00:00 UTC (5:30 AM IST)
+    const now = new Date();
+    const utcMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0);
+
+    const agg = db.prepare(`
+      SELECT
+        COUNT(*) as requests_today,
+        COALESCE(SUM(prompt_tokens), 0) as prompt_tokens_today,
+        COALESCE(SUM(cached_tokens), 0) as cached_tokens_today,
+        COALESCE(SUM(completion_tokens), 0) as completion_tokens_today
+      FROM llm_telemetry
+      WHERE created_at >= ?
+    `).get(utcMidnight);
+
+    const latest = db.prepare(`
+      SELECT * FROM llm_telemetry ORDER BY id DESC LIMIT 1
+    `).get();
+
+    const totalPrompt = agg.prompt_tokens_today || 0;
+    const totalCached = agg.cached_tokens_today || 0;
+    const uncachedPrompt = Math.max(0, totalPrompt - totalCached);
+    const totalUncachedAndCompletion = uncachedPrompt + (agg.completion_tokens_today || 0);
+    const cacheHitPct = totalPrompt > 0 ? Math.round((totalCached / totalPrompt) * 100) : 0;
+    const avgUncachedPerTurn = agg.requests_today > 0 ? Math.round(uncachedPrompt / agg.requests_today) : 0;
+
+    return {
+      model: process.env.LLM_MODEL || 'openai/gpt-oss-120b',
+      rpd_limit: 1000,
+      tpd_limit: 200000,
+      rpm_limit: 30,
+      tpm_limit: 8000,
+      requests_used_today: agg.requests_today || 0,
+      requests_remaining_today: latest?.remaining_requests ?? Math.max(0, 1000 - (agg.requests_today || 0)),
+      tokens_used_today: totalUncachedAndCompletion,
+      tokens_remaining_today: Math.max(0, 200000 - totalUncachedAndCompletion),
+      prompt_tokens_today: totalPrompt,
+      cached_tokens_today: totalCached,
+      completion_tokens_today: agg.completion_tokens_today || 0,
+      cache_hit_pct: cacheHitPct,
+      avg_uncached_tokens_per_turn: avgUncachedPerTurn,
+      latest_remaining_tpm: latest?.remaining_tokens ?? 8000
+    };
+  },
+
   getStats() {
     const totalLeads = db.prepare('SELECT COUNT(*) as count FROM leads').get().count;
     const stages = db.prepare('SELECT stage, COUNT(*) as count FROM leads GROUP BY stage').all();
@@ -670,6 +825,8 @@ export const LeadDB = {
     const optedOutCount = db.prepare('SELECT COUNT(*) as count FROM leads WHERE opted_out = 1').get().count;
     const totalMessages = db.prepare('SELECT COUNT(*) as count FROM messages').get().count;
     const failedMessages = db.prepare("SELECT COUNT(*) as count FROM messages WHERE status = 'FAILED'").get().count;
+    const knowledgeDocsCount = db.prepare('SELECT COUNT(*) as count FROM knowledge_docs').get().count;
+    const knowledgeWordsCount = db.prepare('SELECT COALESCE(SUM(word_count), 0) as words FROM knowledge_docs').get().words;
 
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -678,7 +835,6 @@ export const LeadDB = {
     const activeToday = db.prepare('SELECT COUNT(*) as count FROM leads WHERE last_active_at >= ?').get(todayTs).count;
     const enrolledToday = db.prepare("SELECT COUNT(*) as count FROM leads WHERE stage = 'ENROLLED' AND last_active_at >= ?").get(todayTs).count;
 
-    // Top objections aggregation
     const allObjs = db.prepare('SELECT objections FROM leads WHERE objections IS NOT NULL').all();
     const objectionCounts = {};
     for (const r of allObjs) {
@@ -699,12 +855,14 @@ export const LeadDB = {
       optedOutCount,
       totalMessages,
       failedMessages,
+      knowledgeDocsCount,
+      knowledgeWordsCount,
       stageCounts: Object.fromEntries(stages.map(s => [s.stage, s.count])),
-      objectionCounts
+      objectionCounts,
+      groqQuota: this.getGroqQuotaMetrics()
     };
   },
 
-  // Daily Backup
   createBackup() {
     try {
       const dateStr = new Date().toISOString().slice(0, 10);

@@ -1,6 +1,6 @@
-# 🎓 College Vidya WhatsApp Counselor Bot & CRM
+# 🎓 College Vidya WhatsApp Counselor Bot & CRM (Render.com + Groq `openai/gpt-oss-120b`)
 
-Production-grade autonomous WhatsApp admission counselor & CRM for **College Vidya** built with **Node.js, Express, `@whiskeysockets/baileys`, SQLite (`better-sqlite3` in WAL mode), and Groq LLM**.
+Production-grade autonomous WhatsApp admission counselor & CRM for **College Vidya** built with **Node.js, Express, `@whiskeysockets/baileys`, SQLite (`better-sqlite3` in WAL mode + FTS5 RAG), and Groq `openai/gpt-oss-120b` + `whisper-large-v3-turbo`**.
 
 ---
 
@@ -8,14 +8,40 @@ Production-grade autonomous WhatsApp admission counselor & CRM for **College Vid
 
 | File | Responsibility |
 |---|---|
-| `index.js` | Single-instance Baileys socket manager, exponential backoff reconnect, `DisconnectReason.loggedOut` detection, LID ↔ Phone JID mapping, `fromMe` auto-handover (12h Human mode when replying from linked phone), voice note Whisper STT, image/PDF document saving, and 5-min cron scheduler. |
-| `eligibilityEngine.js` | Deterministic pre-LLM text inference, AICTE/UGC eligibility rules engine, smart 1-question-at-a-time probing order, stage state machine (`NEW` → `QUALIFYING` → `PITCHED` → `WARM` → `DOCS_PENDING` → `PAYMENT_PENDING` → `ENROLLED` / `NOT_ELIGIBLE` / `OPTED_OUT`), and lead scoring (0–100). |
-| `llmBrain.js` | Groq LLM JSON generator (`messages[]`, `profile_updates`, `stage`, `intent`, `needs_human`), truncation check (`finish_reason === 'length'`), WhatsApp formatting post-processor (`**` → `*`, max 2 emojis, max 3 lines/bubble), compliance guard (never calls Sanskriti AICTE-approved), and single-question/anti-repetition validator. |
-| `conversationController.js` | Per-user 8.5s message debouncing, per-user concurrency lock, multi-bubble human rhythm (`readMessages` blue tick → reading pause → proportional `composing` presence → send), 3-try exponential backoff retry, offline SQLite outbound queue, and global rate limit (~20 msgs/min). |
-| `followupEngine.js` | Persistent SQLite-backed ghost detection (1h hot leads / 2h normal leads) & follow-up cadences (`GHOST_NEW`, `GHOST_PITCHED`, `GHOST_WARM`, `GHOST_DOCS`), strict `Asia/Kolkata` (9 AM – 9 PM IST) business-hours queueing with anti-ban jitter, 24×7 Owner Red Alerts, 9 PM IST Daily Reports, and Owner WhatsApp commands. |
-| `database.js` | SQLite WAL database (`crm.db`), automatic non-destructive column migrations, persistent volume detection, LID mapping table, outbound queue, follow-up jobs table, and daily automatic DB backups. |
-| `crmServer.js` & `public/index.html` | Login-protected CRM Dashboard (Kanban pipeline, Live Chat with delivery ticks, AI/Human toggle, "✨ AI Suggest Reply" button, Profile/Document editor, live Knowledge Base JSON editor, Test Chat Simulator, Analytics, CSV export, and `/health` endpoint). |
-| `knowledge_base.json` | Editable university knowledge base (Sanskriti, Kalinga, Lingaya's, and College Vidya Online Partners). |
+| `index.js` | Single-instance Baileys socket manager, Render Persistent Disk auth path (`/data/auth`), exponential backoff reconnect, `DisconnectReason.loggedOut` detection, LID ↔ Phone JID mapping, `fromMe` auto-handover (12h Human mode when replying from linked phone), voice note Whisper STT (`whisper-large-v3-turbo`), image/PDF document saving, and 5-min cron scheduler. |
+| `llmBrain.js` | Locked single-model Groq engine (`openai/gpt-oss-120b`, `reasoning_effort: "low"`, `reasoning_format: "parsed"`, `response_format: { type: "json_object" }`), 100% static `messages[0]` system prompt for automatic Groq Prompt Caching (50% token discount), proactive header-based TPM/RPM pacing, non-destructive validator (regeneration on length truncation, `>1` question, `>60%` repetition, or compliance errors), and zero hardcoded question appenders. |
+| `knowledgeRag.js` | Local SQLite FTS5 RAG engine (`knowledge_docs` + `knowledge_chunks_fts`), auto-seeding 11 deep career & branch encyclopedia modules into `/data/knowledge_library` on boot, ~260-word overlapping chunker, BM25 + tag-boosted retrieval returning top 2 chunks (`<= 480` tokens per turn), and live `.md`/`.txt`/`.pdf` document indexing. |
+| `eligibilityEngine.js` | 14-intent & mood classifier (`GREETING_ONLY`, `IDENTITY_CHECK`, `CONFUSION_OR_GLITCH`, `COURSE_REJECTION`, `CAREER_CONFUSION_OR_ROADMAP`, `BRANCH_SCOPE_QUERY`, `OPT_OUT_OR_EXIT`, etc.), AICTE/UGC eligibility rules engine, `declined_programs` memory, Diploma Track 1 (Working-Professional B.Tech LE) + Track 2 (Online BCA/BBA/B.Com/BA as 10+2 equivalent), and lead scoring (0–100). |
+| `conversationController.js` | Unified `handleIncomingMessage` shared by Baileys (`7s` debounce) and Dashboard Test Chat Simulator (`2.5s` debounce), per-user concurrency lock + `turnSeq` stale-turn cancellation, multi-bubble human rhythm, 3-try exponential backoff retry, and offline SQLite outbound queue. |
+| `followupEngine.js` | Persistent SQLite-backed ghost detection & follow-up cadences (`GHOST_NEW`, `GHOST_PITCHED`, `GHOST_WARM`, `GHOST_DOCS`), strict `Asia/Kolkata` (9 AM – 9 PM IST) business-hours queueing with anti-ban jitter, 24×7 Owner Red Alerts, 9 PM IST Daily Reports, and Owner WhatsApp commands. |
+| `database.js` | SQLite WAL database (`/data/crm.db`), automatic non-destructive column migrations, Render Persistent Disk auto-detection (`/data` vs `./data`), merged multi-bubble conversation history (`getMergedConversationTurns`), and Groq quota telemetry (`llm_telemetry`). |
+| `crmServer.js` & `public/index.html` | Login-protected CRM Dashboard with Live Groq Quota Meter (RPD, TPD, Prompt Cache Hit %, Avg Uncached Tokens/Turn), Kanban pipeline, Live Chat with delivery ticks, **"📚 Career Knowledge Library (RAG)"** uploader (`.md`, `.txt`, `.pdf`) & live FTS5 test search, University Config JSON editor, and Test Chat Simulator with Debug Drawer (`thought`, `reasoning`, `detected_intent`, `rag_docs`, `usage`). |
+| `knowledge_base.json` & `seed_knowledge/` | Structured university facts (Sanskriti, Kalinga, Lingaya's, College Vidya Online Partners) + 11 deep career counseling modules seeded from `career_knowledge_encyclopedia.md`. |
+
+---
+
+## ☁️ Render.com Deployment & Persistent Disk Setup
+
+1. **Blueprint / Service Configuration (`render.yaml`):**
+   - Bind Express server to `0.0.0.0` on `process.env.PORT || 3000`.
+   - Health check endpoint: `GET /health` (returns `{ status: "ok", whatsapp_connected, db_path, model, groq_quota, knowledge_docs_indexed }`).
+2. **Persistent Disk (`/data`):**
+   - Attach a **1 GB Persistent Disk** mounted at `/data`.
+   - The app automatically stores:
+     - SQLite database: `/data/crm.db`
+     - Baileys WhatsApp auth credentials: `/data/auth`
+     - Career Knowledge Library markdown files: `/data/knowledge_library`
+     - Student document uploads: `/data/uploads`
+     - Daily database backups: `/data/backups`
+   - *Note:* On Render's Free tier, services spin down after 15 minutes of HTTP inactivity, which drops the persistent Baileys WebSocket connection and wipes ephemeral disk if no Persistent Disk is attached. Use Render's **Starter Plan** (always-on + `/data` Persistent Disk) for 24×7 WhatsApp connectivity, or connect an external uptime monitor pinging `GET /health` every 5 minutes.
+3. **Environment Variables on Render.com:**
+   - `GROQ_API_KEY` (set in Render Dashboard Environment tab — **never commit to Git**)
+   - `LLM_MODEL=openai/gpt-oss-120b`
+   - `OWNER_NUMBER=917982412945@s.whatsapp.net`
+   - `CRM_USERNAME=harsh`
+   - `CRM_PASSWORD=<your_strong_password>`
+   - `DATA_DIR=/data`
+   - `TZ=Asia/Kolkata`
 
 ---
 
@@ -29,57 +55,9 @@ npm install
 cp .env.example .env
 # Edit .env and set GROQ_API_KEY, CRM_USERNAME, CRM_PASSWORD
 
-# 3. Run automated 23-scenario test suite
+# 3. Run the 15-scenario live Groq verification & transcript replay suite
 npm test
 
-# 4. Run interactive CLI chat simulator (no WhatsApp required)
-npm run simulate
-
-# 5. Start the live WhatsApp Bot + CRM Dashboard
+# 4. Start the live WhatsApp Bot + CRM Dashboard
 npm start
 ```
-
-Open **`http://localhost:3000`** and sign in with your `CRM_USERNAME` and `CRM_PASSWORD`.
-
----
-
-## ☁️ Railway Production & Volume Setup (DB + Baileys Auth)
-
-Railway container filesystems are ephemeral unless backed by a **Railway Volume**:
-1. **Single Replica Only:** In Railway Service Settings → Deploy → set **Replicas = 1** (two replicas would start two Baileys sockets and cause session conflicts).
-2. **Volume Mount:**
-   - Mount your Railway Volume at `/data` (or keep existing `/app/auth_info_baileys` — `database.js` automatically detects `/app/auth_info_baileys` on Railway and stores `crm.db`, `backups/`, and `uploads/` inside the persistent volume so redeploys never wipe your database!).
-3. **Environment Variables on Railway:**
-   - `GROQ_API_KEY`
-   - `OWNER_NUMBER=917982412945`
-   - `CRM_USERNAME=harsh`
-   - `CRM_PASSWORD=<your_strong_password>`
-   - `PORT=3000`
-
----
-
-## 📱 WhatsApp QR / Phone Pairing Login
-
-1. Log into the CRM Dashboard (`https://college-vidya-bot-production.up.railway.app`).
-2. Click the **Connected / Disconnected** status button in the top right to open the **WhatsApp Connection Modal**.
-3. Either scan the crisp square **QR Code** OR enter your WhatsApp number (e.g. `917982412945`) and click **Get Code** to receive an **8-digit Pairing Code** for *WhatsApp → Linked Devices → Link with phone number instead*.
-
----
-
-## 📚 Editing the Knowledge Base
-
-You can update university fees, approvals, geo rules (`pan_india`, `states`, `radius_km`), USPs, or deadlines anytime without changing code:
-- **Via Dashboard:** Open the **Knowledge Base** tab, edit the JSON config, and click **Save Knowledge Base** (persisted in SQLite `kb_store` and `knowledge_base.json` with updated `last_verified_date`).
-
----
-
-## 📲 Owner WhatsApp Commands (from `917982412945`)
-
-Send any of these commands from the owner number:
-- `/report` — Generate and receive the full daily pipeline report immediately
-- `/hot` — List top hot leads (`score >= 70` or `WARM`/`DOCS_PENDING`/`PAYMENT_PENDING`)
-- `/lead <phone>` — View full dossier summary for a student
-- `/takeover <phone>` — Switch lead to `HUMAN` mode (bot goes silent for this lead)
-- `/release <phone>` — Return lead back to `AI` mode
-- `/pause` / `/resume` — Pause or resume AI auto-replies globally
-- `/say <phone> <message>` — Send `<message>` to student as human advisor

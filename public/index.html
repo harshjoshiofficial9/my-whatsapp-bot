@@ -72,11 +72,11 @@
       <div>
         <div class="flex items-center gap-2">
           <h1 class="font-bold text-base text-slate-900">College Vidya CRM</h1>
-          <span class="text-[11px] bg-emerald-100 text-emerald-800 font-semibold px-2 py-0.5 rounded-full border border-emerald-300">
-            Deterministic Engine + Groq AI
+          <span id="groq-quota-pill" class="text-[11px] bg-emerald-100 text-emerald-800 font-semibold px-2 py-0.5 rounded-full border border-emerald-300">
+            gpt-oss-120b · Cache: --%
           </span>
         </div>
-        <p class="text-[11px] text-slate-500">WhatsApp Admission & Lead Conversion Console</p>
+        <p class="text-[11px] text-slate-500">Intent-First Engine + SQLite FTS5 RAG Library</p>
       </div>
     </div>
 
@@ -88,17 +88,20 @@
       <button onclick="switchTab('chat')" id="tab-btn-chat" class="px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900">
         <i class="fa-brands fa-whatsapp mr-1 text-emerald-600"></i> Live Chat
       </button>
-      <button onclick="switchTab('followups')" id="tab-btn-followups" class="px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900">
-        <i class="fa-solid fa-clock-rotate-left mr-1 text-amber-600"></i> Follow-ups (<span id="ghost-count-badge">0</span>)
+      <button onclick="switchTab('library')" id="tab-btn-library" class="px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900">
+        <i class="fa-solid fa-brain mr-1 text-rose-600"></i> Knowledge Library
       </button>
       <button onclick="switchTab('kb')" id="tab-btn-kb" class="px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900">
-        <i class="fa-solid fa-book-open mr-1 text-blue-600"></i> Knowledge Base
+        <i class="fa-solid fa-building-columns mr-1 text-blue-600"></i> Univ Config
+      </button>
+      <button onclick="switchTab('followups')" id="tab-btn-followups" class="px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900">
+        <i class="fa-solid fa-clock-rotate-left mr-1 text-amber-600"></i> Follow-ups (<span id="ghost-count-badge">0</span>)
       </button>
       <button onclick="switchTab('simulator')" id="tab-btn-simulator" class="px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900">
         <i class="fa-solid fa-flask mr-1 text-purple-600"></i> Test Chat
       </button>
       <button onclick="switchTab('analytics')" id="tab-btn-analytics" class="px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900">
-        <i class="fa-solid fa-chart-pie mr-1 text-indigo-600"></i> Analytics
+        <i class="fa-solid fa-chart-pie mr-1 text-indigo-600"></i> Quota & Stats
       </button>
     </div>
 
@@ -110,7 +113,7 @@
       </button>
 
       <button onclick="exportToCsv()" class="px-3 py-1.5 text-xs font-semibold text-white bg-cv-dark hover:bg-emerald-800 rounded-lg shadow flex items-center gap-1.5 transition">
-        <i class="fa-solid fa-file-excel"></i> Export CSV
+        <i class="fa-solid fa-file-excel"></i> CSV
       </button>
 
       <button onclick="handleLogout()" title="Logout" class="p-1.5 text-xs text-slate-500 hover:text-red-600 rounded-lg border border-slate-200">
@@ -161,7 +164,6 @@
 
     <!-- TAB 2: LIVE CHAT & HUMAN TAKEOVER -->
     <div id="tab-chat" class="hidden flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex">
-      <!-- Left: Leads Conversation List -->
       <div class="w-80 border-r border-slate-200 flex flex-col bg-slate-50">
         <div class="p-3 border-b border-slate-200 space-y-2">
           <input type="text" id="chat-search" oninput="renderChatList()" placeholder="Search student name or number..." 
@@ -170,15 +172,12 @@
         <div id="chat-leads-list" class="flex-1 overflow-y-auto divide-y divide-slate-100"></div>
       </div>
 
-      <!-- Right: WhatsApp Chat Window -->
       <div class="flex-1 flex flex-col bg-[#efeae2] relative">
-        <!-- Human Handling Banner -->
         <div id="human-mode-banner" class="hidden bg-blue-600 text-white text-xs font-semibold px-4 py-1.5 flex items-center justify-between">
           <span>🧑 Human Handling Active — Bot is completely silent (no auto-replies or follow-ups) for this student.</span>
           <button onclick="toggleAiAutopilot(true)" class="bg-white text-blue-700 px-2.5 py-0.5 rounded font-bold text-[11px]">Switch back to AI</button>
         </div>
 
-        <!-- Chat Header -->
         <div class="bg-white border-b border-slate-200 px-5 py-2.5 flex items-center justify-between shadow-sm">
           <div class="flex items-center gap-3">
             <div class="w-9 h-9 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-sm" id="active-lead-avatar">?</div>
@@ -192,9 +191,15 @@
           </div>
 
           <div class="flex items-center gap-3">
+            <label class="flex items-center gap-1.5 text-xs font-semibold text-purple-700 bg-purple-50 px-2.5 py-1 rounded-lg border border-purple-200 cursor-pointer">
+              <input type="checkbox" id="chat-debug-toggle" onchange="if(activeLeadPhone) loadMessages(activeLeadPhone, false)" checked>
+              <span>🧠 Debug Reasoning & RAG</span>
+            </label>
+
             <select id="active-lead-stage-select" onchange="updateActiveLeadStage(this.value)" 
               class="text-xs font-semibold bg-slate-100 border border-slate-300 rounded-lg px-2 py-1.5">
               <option value="NEW">NEW</option>
+              <option value="ENGAGED">ENGAGED</option>
               <option value="QUALIFYING">QUALIFYING</option>
               <option value="PITCHED">PITCHED</option>
               <option value="WARM">WARM</option>
@@ -216,19 +221,17 @@
             </div>
 
             <button onclick="openProfileDrawer()" class="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg">
-              <i class="fa-solid fa-address-card mr-1"></i> Profile & Docs
+              <i class="fa-solid fa-address-card mr-1"></i> Profile
             </button>
           </div>
         </div>
 
-        <!-- Chat Messages Area -->
         <div id="chat-messages-container" class="flex-1 overflow-y-auto p-5 space-y-2.5">
           <div class="flex items-center justify-center h-full text-slate-400 text-sm">
             <p>Select a student from the left list to view conversation</p>
           </div>
         </div>
 
-        <!-- Chat Bottom Input Bar -->
         <div class="bg-white border-t border-slate-200 p-3 flex flex-col gap-2">
           <div class="flex items-center justify-between gap-2 overflow-x-auto pb-1 text-xs">
             <div class="flex gap-1.5">
@@ -257,7 +260,96 @@
       </div>
     </div>
 
-    <!-- TAB 3: FOLLOW-UPS & REMINDERS -->
+    <!-- TAB 3: KNOWLEDGE LIBRARY (SQLITE FTS5 RAG ENGINE) -->
+    <div id="tab-library" class="hidden flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex">
+      <!-- Left: Docs list & Test Search -->
+      <div class="w-96 border-r border-slate-200 flex flex-col bg-slate-50 p-4 space-y-3 overflow-y-auto">
+        <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+          <div class="flex items-center justify-between mb-1">
+            <h3 class="font-bold text-xs text-slate-800 uppercase">📚 FTS5 Knowledge Brain</h3>
+            <button onclick="newKnowledgeDocForm()" class="px-2.5 py-1 bg-cv-dark text-white text-[11px] font-semibold rounded-lg">+ Add Doc / Book</button>
+          </div>
+          <p class="text-[11px] text-slate-500">
+            Docs: <b id="rag-total-docs">0</b> · Words: <b id="rag-total-words">0</b> · FTS5 Chunks: <b id="rag-total-chunks">0</b>
+          </p>
+        </div>
+
+        <!-- Test Knowledge Search Box -->
+        <div class="bg-purple-50 p-3 rounded-xl border border-purple-200 space-y-2">
+          <label class="block text-[11px] font-bold text-purple-900 uppercase">🔍 Test FTS5 Retrieval (≤500 Tokens)</label>
+          <div class="flex gap-1.5">
+            <input type="text" id="rag-test-query" placeholder="e.g. mechanical diploma ev future salary" class="flex-1 px-2.5 py-1.5 text-xs bg-white border border-purple-300 rounded-lg">
+            <button onclick="runRagTestSearch()" class="px-3 py-1.5 bg-purple-700 text-white text-xs font-semibold rounded-lg">Search</button>
+          </div>
+          <pre id="rag-test-results" class="hidden text-[10px] font-mono bg-slate-900 text-emerald-300 p-2.5 rounded-lg max-h-48 overflow-y-auto whitespace-pre-wrap"></pre>
+        </div>
+
+        <div id="rag-docs-list" class="space-y-2 flex-1 overflow-y-auto"></div>
+      </div>
+
+      <!-- Right: Document Editor / Book & Web Article Importer -->
+      <div class="flex-1 flex flex-col p-5 overflow-y-auto">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h2 class="text-base font-bold text-slate-900">Add / Edit Career Knowledge Document (Auto-Chunks & FTS5 Indexes)</h2>
+            <p class="text-xs text-slate-500">Upload .md / .txt files or paste books, articles, and branch guides (unlimited words — zero TPM bloat!)</p>
+          </div>
+          <label class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold cursor-pointer border border-slate-300">
+            <i class="fa-solid fa-upload mr-1"></i> Load .MD / .TXT File
+            <input type="file" accept=".md,.txt" onchange="handleKnowledgeFileUpload(event)" class="hidden">
+          </label>
+        </div>
+
+        <form onsubmit="saveKnowledgeDoc(event)" class="flex-1 flex flex-col space-y-3 text-xs">
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block font-semibold text-slate-600 mb-1">Doc ID (slug)</label>
+              <input type="text" id="kdoc-id" placeholder="e.g. branch_mechanical_engineering" required class="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg font-mono">
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-600 mb-1">Title / Summary</label>
+              <input type="text" id="kdoc-title" placeholder="Mechanical Engineering 2026-2035 Guide" required class="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg">
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-600 mb-1">Category</label>
+              <input type="text" id="kdoc-category" value="Engineering Branches" class="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg">
+            </div>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-600 mb-1">Search Tags (comma-separated for FTS5 boost)</label>
+            <input type="text" id="kdoc-tags" placeholder="mechanical, diploma, ev, solidworks, ansys, salary, promotion" class="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg">
+          </div>
+          <div class="flex-1 flex flex-col">
+            <label class="block font-semibold text-slate-600 mb-1">Full Markdown / Book / Article Content</label>
+            <textarea id="kdoc-content" required class="flex-1 w-full font-mono text-xs p-3.5 bg-slate-900 text-emerald-300 rounded-xl border border-slate-700 focus:outline-none"></textarea>
+          </div>
+          <div class="flex justify-end gap-2">
+            <button type="submit" class="px-5 py-2 bg-cv-dark hover:bg-emerald-800 text-white font-semibold rounded-xl shadow">
+              <i class="fa-solid fa-bolt mr-1"></i> Save & Index into SQLite FTS5
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- TAB 4: UNIVERSITY KNOWLEDGE BASE CONFIG -->
+    <div id="tab-kb" class="hidden flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col p-5">
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <h2 class="text-base font-bold text-slate-900">University Knowledge Base Config (`knowledge_base.json`)</h2>
+          <p class="text-xs text-slate-500">Edit fees, approvals, geo rules, USPs. Bot reads eligibility & facts strictly from this config.</p>
+        </div>
+        <div class="flex items-center gap-3">
+          <span class="text-xs text-slate-500">Last Verified: <b id="kb-verified-date">--</b></span>
+          <button onclick="saveKnowledgeBase()" class="px-4 py-1.5 bg-cv-dark hover:bg-emerald-800 text-white text-xs font-semibold rounded-xl shadow">
+            <i class="fa-solid fa-floppy-disk mr-1"></i> Save Knowledge Base
+          </button>
+        </div>
+      </div>
+      <textarea id="kb-json-editor" class="flex-1 w-full font-mono text-xs p-4 bg-slate-900 text-emerald-300 rounded-xl border border-slate-700 focus:outline-none"></textarea>
+    </div>
+
+    <!-- TAB 5: FOLLOW-UPS & REMINDERS -->
     <div id="tab-followups" class="hidden flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col p-5">
       <div class="flex items-center justify-between mb-4">
         <div>
@@ -285,30 +377,13 @@
       </div>
     </div>
 
-    <!-- TAB 4: KNOWLEDGE BASE EDITOR -->
-    <div id="tab-kb" class="hidden flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col p-5">
-      <div class="flex items-center justify-between mb-3">
-        <div>
-          <h2 class="text-base font-bold text-slate-900">University Knowledge Base Config (`knowledge_base.json`)</h2>
-          <p class="text-xs text-slate-500">Edit fees, approvals, geo rules, USPs. Bot reads eligibility & facts strictly from this config.</p>
-        </div>
-        <div class="flex items-center gap-3">
-          <span class="text-xs text-slate-500">Last Verified: <b id="kb-verified-date">--</b></span>
-          <button onclick="saveKnowledgeBase()" class="px-4 py-1.5 bg-cv-dark hover:bg-emerald-800 text-white text-xs font-semibold rounded-xl shadow">
-            <i class="fa-solid fa-floppy-disk mr-1"></i> Save Knowledge Base
-          </button>
-        </div>
-      </div>
-      <textarea id="kb-json-editor" class="flex-1 w-full font-mono text-xs p-4 bg-slate-900 text-emerald-300 rounded-xl border border-slate-700 focus:outline-none"></textarea>
-    </div>
-
-    <!-- TAB 5: TEST CHAT SIMULATOR (PHASE 7) -->
+    <!-- TAB 6: TEST CHAT SIMULATOR (SHARES handleIncomingMessage WITH 2.5s DEBOUNCE) -->
     <div id="tab-simulator" class="hidden flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex">
       <div class="flex-1 flex flex-col bg-[#efeae2]">
         <div class="bg-white border-b border-slate-200 px-5 py-3 flex items-center justify-between">
           <div>
-            <h3 class="font-bold text-sm text-slate-900">🧪 Counselor Bot Simulator (No WhatsApp Needed)</h3>
-            <p class="text-xs text-slate-500">Test multi-bubble replies, 1-question probing, and eligibility rules live</p>
+            <h3 class="font-bold text-sm text-slate-900">🧪 Counselor Bot Simulator (Shared 2.5s Debounce + TurnSeq Lock)</h3>
+            <p class="text-xs text-slate-500">Send rapid messages like "Hello" then "Hyy" within 2.5s to watch them merge into ONE turn!</p>
           </div>
           <button onclick="resetSimulator()" class="px-3 py-1.5 bg-red-50 text-red-700 hover:bg-red-100 rounded-lg text-xs font-semibold border border-red-200">
             <i class="fa-solid fa-trash-can mr-1"></i> Reset Test Lead
@@ -316,19 +391,50 @@
         </div>
         <div id="sim-messages" class="flex-1 overflow-y-auto p-5 space-y-2.5"></div>
         <form onsubmit="sendSimulatorMessage(event)" class="bg-white p-3 border-t border-slate-200 flex gap-2">
-          <input type="text" id="sim-input" placeholder="Try: 'bhai mujhe btech krni h job ke sath, 12th kiya h' or 'diploma civil 60% private job'..." 
+          <input type="text" id="sim-input" placeholder="Type message (rapid sends within 2.5s merge automatically)..." 
             class="flex-1 px-4 py-2 bg-slate-100 border border-slate-300 rounded-xl text-sm focus:outline-none focus:bg-white">
           <button type="submit" class="px-5 py-2 bg-cv-green text-white font-semibold rounded-xl text-sm">Send</button>
         </form>
       </div>
       <div class="w-96 border-l border-slate-200 bg-slate-50 p-4 overflow-y-auto text-xs space-y-3">
-        <h4 class="font-bold text-slate-800 uppercase tracking-wider">Live Deterministic Engine State</h4>
-        <pre id="sim-state-inspector" class="bg-slate-900 text-emerald-300 p-3 rounded-xl overflow-x-auto text-[11px] font-mono">Send a message to inspect engine output...</pre>
+        <h4 class="font-bold text-slate-800 uppercase tracking-wider">Live Thought, Intent, RAG & Quota</h4>
+        <pre id="sim-state-inspector" class="bg-slate-900 text-emerald-300 p-3 rounded-xl overflow-x-auto text-[11px] font-mono whitespace-pre-wrap">Send a message to inspect thought, detected_intent, RAG chunks & prompt cache...</pre>
       </div>
     </div>
 
-    <!-- TAB 6: ANALYTICS -->
+    <!-- TAB 7: ANALYTICS & GROQ QUOTA METER -->
     <div id="tab-analytics" class="hidden flex-1 overflow-y-auto space-y-5">
+      <!-- Live Groq Quota & Prompt Cache Card -->
+      <div class="bg-slate-900 text-white p-5 rounded-2xl shadow-md">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <h3 class="font-bold text-sm text-emerald-400 uppercase tracking-wider">⚡ Locked Groq Engine Telemetry (`openai/gpt-oss-120b`)</h3>
+            <p class="text-xs text-slate-400">Limits: 30 RPM · 1,000 RPD · 8,000 TPM · 200,000 TPD (Resets 5:30 AM IST)</p>
+          </div>
+          <span id="quota-cache-badge" class="bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-3 py-1 rounded-full text-xs font-bold">
+            Prompt Cache Hit: 0%
+          </span>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+          <div class="bg-slate-800 p-3.5 rounded-xl">
+            <span class="text-slate-400 block">Requests Today (RPD)</span>
+            <b id="quota-rpd" class="text-lg text-white">0 / 1,000</b>
+          </div>
+          <div class="bg-slate-800 p-3.5 rounded-xl">
+            <span class="text-slate-400 block">Uncached Tokens Today (TPD)</span>
+            <b id="quota-tpd" class="text-lg text-white">0 / 200,000</b>
+          </div>
+          <div class="bg-slate-800 p-3.5 rounded-xl">
+            <span class="text-slate-400 block">Cached Prompt Tokens Saved</span>
+            <b id="quota-cached" class="text-lg text-emerald-400">0 tokens</b>
+          </div>
+          <div class="bg-slate-800 p-3.5 rounded-xl">
+            <span class="text-slate-400 block">Avg Uncached Tokens / Turn</span>
+            <b id="quota-avg" class="text-lg text-amber-300">0 tokens</b>
+          </div>
+        </div>
+      </div>
+
       <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
         <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
           <p class="text-[11px] font-semibold text-slate-500 uppercase">Total Leads</p>
@@ -390,6 +496,7 @@
             <label class="block font-semibold text-slate-500 uppercase mb-1">Qualification</label>
             <select id="dossier-qualification" class="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-lg">
               <option value="">Unknown</option>
+              <option value="10TH">10TH Pass</option>
               <option value="12TH_SCIENCE">12TH_SCIENCE</option>
               <option value="12TH_COMMERCE">12TH_COMMERCE</option>
               <option value="12TH_ARTS">12TH_ARTS</option>
@@ -497,6 +604,7 @@
 
     const STAGES = [
       { id: 'NEW', label: 'New', color: 'border-slate-300 bg-slate-50' },
+      { id: 'ENGAGED', label: 'Engaged', color: 'border-cyan-300 bg-cyan-50/30' },
       { id: 'QUALIFYING', label: 'Qualifying', color: 'border-blue-300 bg-blue-50/40' },
       { id: 'PITCHED', label: 'Pitched', color: 'border-amber-300 bg-amber-50/40' },
       { id: 'WARM', label: 'Warm 🔥', color: 'border-orange-300 bg-orange-50/40' },
@@ -551,6 +659,7 @@
       await checkConnectionBadge(true);
       setInterval(async () => {
         await fetchLeads(false);
+        await fetchStats();
         await checkConnectionBadge(false);
         if (activeLeadPhone && currentTab === 'chat') {
           await loadMessages(activeLeadPhone, false);
@@ -581,7 +690,7 @@
 
     function switchTab(tabId) {
       currentTab = tabId;
-      ['kanban', 'chat', 'followups', 'kb', 'simulator', 'analytics'].forEach(t => {
+      ['kanban', 'chat', 'library', 'kb', 'followups', 'simulator', 'analytics'].forEach(t => {
         document.getElementById(`tab-${t}`).classList.add('hidden');
         document.getElementById(`tab-btn-${t}`).className = 'px-3 py-1.5 rounded-lg transition-all text-slate-600 hover:text-slate-900';
       });
@@ -590,8 +699,9 @@
 
       if (tabId === 'kanban') renderKanban();
       if (tabId === 'chat') renderChatList();
-      if (tabId === 'followups') loadFollowUpsTab();
+      if (tabId === 'library') loadKnowledgeLibraryTab();
       if (tabId === 'kb') loadKnowledgeBase();
+      if (tabId === 'followups') loadFollowUpsTab();
       if (tabId === 'analytics') renderAnalytics();
     }
 
@@ -611,6 +721,10 @@
       if (!res.ok) return;
       const stats = await res.json();
       window.latestStats = stats;
+      if (stats.groqQuota) {
+        const q = stats.groqQuota;
+        document.getElementById('groq-quota-pill').innerText = `gpt-oss-120b · Cache: ${q.cache_hit_pct}% · RPD: ${q.requests_used_today}/1K`;
+      }
     }
 
     function updateHeaderCounts() {
@@ -742,6 +856,7 @@
       const data = await res.json();
       const messages = data.messages || data;
       const followups = data.followups || [];
+      const showDebug = document.getElementById('chat-debug-toggle')?.checked;
 
       const fuStatus = document.getElementById('lead-followup-status');
       if (followups.length > 0) {
@@ -764,6 +879,17 @@
         const sender = isUser ? 'Student' : (m.role === 'human' ? '🧑 Harsh (Human)' : '🤖 Harsh AI');
         const mediaHtml = m.media_path ? `<div class="mt-1"><a href="/uploads/${encodeURIComponent(m.media_path)}" target="_blank" class="text-xs text-blue-600 underline"><i class="fa-solid fa-paperclip"></i> View Uploaded File (${m.media_type || 'document'})</a></div>` : '';
 
+        let debugHtml = '';
+        if (showDebug && !isUser && (m.thought || m.detected_intent || m.rag_docs)) {
+          debugHtml = `
+            <div class="mt-2 pt-1.5 border-t border-emerald-700/20 text-[10px] font-mono text-slate-600 bg-white/60 p-1.5 rounded">
+              ${m.detected_intent ? `<div><b>Intent:</b> ${escapeHtml(m.detected_intent)}</div>` : ''}
+              ${m.thought ? `<div><b>Thought:</b> ${escapeHtml(m.thought)}</div>` : ''}
+              ${m.rag_docs && m.rag_docs !== '[]' ? `<div><b>FTS5 RAG Docs:</b> ${escapeHtml(m.rag_docs)}</div>` : ''}
+            </div>
+          `;
+        }
+
         return `
           <div class="flex ${align}">
             <div class="max-w-[75%] p-3 shadow-sm text-xs ${bubbleClass}">
@@ -773,6 +899,7 @@
               </div>
               <div class="whitespace-pre-wrap leading-relaxed text-slate-800">${escapeHtml(m.text)}</div>
               ${mediaHtml}
+              ${debugHtml}
               <div class="text-right text-[10px] text-slate-400 mt-1">
                 ${new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 ${!isUser ? renderStatusTick(m.status) : ''}
@@ -850,6 +977,110 @@
       await fetchLeads(true);
     }
 
+    // ================= KNOWLEDGE LIBRARY (FTS5 RAG) =================
+    async function loadKnowledgeLibraryTab() {
+      const res = await fetch('/api/knowledge');
+      if (!res.ok) return;
+      const data = await res.json();
+      document.getElementById('rag-total-docs').innerText = data.total_docs || 0;
+      document.getElementById('rag-total-words').innerText = (data.total_words || 0).toLocaleString();
+      document.getElementById('rag-total-chunks').innerText = data.total_chunks || 0;
+
+      const listEl = document.getElementById('rag-docs-list');
+      listEl.innerHTML = (data.docs || []).map(d => `
+        <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-sm hover:border-cv-green transition">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-mono font-bold text-xs text-cv-dark truncate">${escapeHtml(d.doc_id)}</span>
+            <div class="flex gap-1.5">
+              <button onclick="editKnowledgeDoc('${d.doc_id}')" class="text-[11px] text-blue-600 font-semibold hover:underline">Edit</button>
+              <button onclick="deleteKnowledgeDoc('${d.doc_id}')" class="text-[11px] text-red-600 font-semibold hover:underline">Delete</button>
+            </div>
+          </div>
+          <p class="text-xs font-semibold text-slate-800 truncate">${escapeHtml(d.title)}</p>
+          <p class="text-[10px] text-slate-500 truncate mt-0.5">Tags: ${escapeHtml(d.tags)}</p>
+          <div class="flex justify-between text-[10px] text-slate-400 mt-1 pt-1 border-t border-slate-100">
+            <span>${escapeHtml(d.category)}</span>
+            <span>${d.word_count} words · ${d.chunk_count} chunks</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function newKnowledgeDocForm() {
+      document.getElementById('kdoc-id').value = '';
+      document.getElementById('kdoc-title').value = '';
+      document.getElementById('kdoc-category').value = 'Career Guidance';
+      document.getElementById('kdoc-tags').value = '';
+      document.getElementById('kdoc-content').value = '';
+      document.getElementById('kdoc-id').focus();
+    }
+
+    async function editKnowledgeDoc(docId) {
+      const res = await fetch(`/api/knowledge/${encodeURIComponent(docId)}`);
+      if (!res.ok) return;
+      const doc = await res.json();
+      document.getElementById('kdoc-id').value = doc.doc_id;
+      document.getElementById('kdoc-title').value = doc.title;
+      document.getElementById('kdoc-category').value = doc.category || 'Career Guidance';
+      document.getElementById('kdoc-tags').value = doc.tags || '';
+      document.getElementById('kdoc-content').value = doc.content || '';
+    }
+
+    async function saveKnowledgeDoc(e) {
+      e.preventDefault();
+      const payload = {
+        doc_id: document.getElementById('kdoc-id').value.trim(),
+        title: document.getElementById('kdoc-title').value.trim(),
+        category: document.getElementById('kdoc-category').value.trim(),
+        tags: document.getElementById('kdoc-tags').value.trim(),
+        content: document.getElementById('kdoc-content').value
+      };
+      const res = await fetch('/api/knowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        alert('✅ Document chunked & indexed in SQLite FTS5!');
+        await loadKnowledgeLibraryTab();
+      }
+    }
+
+    async function deleteKnowledgeDoc(docId) {
+      if (!confirm(`Delete knowledge document "${docId}"?`)) return;
+      await fetch(`/api/knowledge/${encodeURIComponent(docId)}`, { method: 'DELETE' });
+      await loadKnowledgeLibraryTab();
+    }
+
+    function handleKnowledgeFileUpload(e) {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const text = ev.target.result;
+        const baseName = file.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+        document.getElementById('kdoc-id').value = baseName;
+        document.getElementById('kdoc-title').value = file.name;
+        document.getElementById('kdoc-content').value = text;
+      };
+      reader.readAsText(file);
+    }
+
+    async function runRagTestSearch() {
+      const q = document.getElementById('rag-test-query').value.trim();
+      if (!q) return;
+      const res = await fetch('/api/knowledge/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q })
+      });
+      const data = await res.json();
+      const pre = document.getElementById('rag-test-results');
+      pre.classList.remove('hidden');
+      pre.innerText = JSON.stringify(data, null, 2);
+    }
+
+    // ================= FOLLOW-UPS & UNIV KB =================
     async function loadFollowUpsTab() {
       const res = await fetch('/api/followups');
       if (!res.ok) return;
@@ -905,7 +1136,7 @@
       }
     }
 
-    // Simulator
+    // ================= SIMULATOR (SHARED 2.5s DEBOUNCE) =================
     async function sendSimulatorMessage(e) {
       e.preventDefault();
       const input = document.getElementById('sim-input');
@@ -913,35 +1144,49 @@
       if (!text) return;
       input.value = '';
 
+      // Optimistically render user bubble immediately so rapid sends feel just like WhatsApp!
+      const container = document.getElementById('sim-messages');
+      container.innerHTML += `
+        <div class="flex justify-start">
+          <div class="max-w-[75%] p-3 shadow-sm text-xs wa-bubble-user whitespace-pre-wrap">${escapeHtml(text)}</div>
+        </div>
+      `;
+      container.scrollTop = container.scrollHeight;
+
       const res = await fetch('/api/simulator/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ text, debounceMs: 2500 })
       });
       const data = await res.json();
+      if (data.staleCancelled) return; // A newer message superseded this request
       renderSimulatorMessages(data.messages || []);
       document.getElementById('sim-state-inspector').innerText = JSON.stringify({
-        stage: data.stageInfo?.stage,
-        lead_score: data.stageInfo?.lead_score,
+        thought: data.turnResult?.thought || data.lead?.last_thought,
+        detected_intent: data.turnResult?.detected_intent || data.lead?.last_intent,
+        stage: data.lead?.stage,
+        lead_score: data.lead?.lead_score,
+        rag_docs: data.turnResult?.rag_docs || data.lead?.last_rag_docs,
+        token_usage: data.turnResult?.usage,
+        quota_today: data.quota,
         profile: {
           qualification: data.lead?.qualification,
           stream: data.lead?.stream_branch,
           percentage: data.lead?.percentage,
           employment_type: data.lead?.employment_type,
           city: data.lead?.city,
+          declined_programs: data.lead?.declined_programs,
           recommended_university: data.lead?.recommended_university
-        },
-        eligibility: data.eligibilityResult
+        }
       }, null, 2);
     }
 
     async function resetSimulator() {
-      const res = await fetch('/api/simulator/chat', {
+      await fetch('/api/simulator/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reset: true })
       });
-      const data = await res.json();
       renderSimulatorMessages([]);
       document.getElementById('sim-state-inspector').innerText = 'Test lead reset to NEW.';
     }
@@ -950,18 +1195,31 @@
       const container = document.getElementById('sim-messages');
       container.innerHTML = messages.map(m => {
         const isUser = m.role === 'user';
+        let debugInfo = '';
+        if (!isUser && (m.thought || m.detected_intent)) {
+          debugInfo = `<div class="mt-1.5 pt-1 border-t border-emerald-700/20 text-[10px] font-mono text-slate-600"><b>Intent:</b> ${escapeHtml(m.detected_intent || '')} | <b>Thought:</b> ${escapeHtml(m.thought || '')}</div>`;
+        }
         return `
           <div class="flex ${isUser ? 'justify-start' : 'justify-end'}">
-            <div class="max-w-[75%] p-3 shadow-sm text-xs ${isUser ? 'wa-bubble-user' : 'wa-bubble-bot'} whitespace-pre-wrap">${escapeHtml(m.text)}</div>
+            <div class="max-w-[75%] p-3 shadow-sm text-xs ${isUser ? 'wa-bubble-user' : 'wa-bubble-bot'} whitespace-pre-wrap">${escapeHtml(m.text)}${debugInfo}</div>
           </div>
         `;
       }).join('');
       container.scrollTop = container.scrollHeight;
     }
 
+    // ================= ANALYTICS & QUOTA =================
     async function renderAnalytics() {
       await fetchStats();
       const stats = window.latestStats || {};
+      const q = stats.groqQuota || {};
+
+      document.getElementById('quota-cache-badge').innerText = `Prompt Cache Hit: ${q.cache_hit_pct || 0}%`;
+      document.getElementById('quota-rpd').innerText = `${q.requests_used_today || 0} / 1,000`;
+      document.getElementById('quota-tpd').innerText = `${(q.tokens_used_today || 0).toLocaleString()} / 200,000`;
+      document.getElementById('quota-cached').innerText = `${(q.cached_tokens_today || 0).toLocaleString()} tokens`;
+      document.getElementById('quota-avg').innerText = `${q.avg_uncached_tokens_per_turn || 0} tokens`;
+
       document.getElementById('analytics-total').innerText = allLeads.length;
       document.getElementById('analytics-hot').innerText = allLeads.filter(l => (l.lead_score || 0) >= 70).length;
       document.getElementById('analytics-ghost').innerText = allLeads.filter(l => l.is_ghost).length;

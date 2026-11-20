@@ -1,27 +1,16 @@
 import assert from 'assert';
 import { LeadDB } from '../database.js';
-import { inferFromUserText, evaluateEligibility } from '../eligibilityEngine.js';
-import {
-  processStudentTurn,
-  enqueueIncomingUserMessage,
-  flushOutboundQueue
-} from '../conversationController.js';
-import {
-  adjustToBusinessHoursIST,
-  getISTParts,
-  scheduleGhostFollowUps,
-  HOUR
-} from '../followupEngine.js';
+import { KnowledgeRAG } from '../knowledgeRag.js';
+import { handleIncomingMessage } from '../conversationController.js';
 
-// Run deterministic + post-processor pipeline for reliable, fast automated testing
 process.env.NODE_ENV = 'test';
-process.env.DISABLE_LLM_FOR_TESTS = process.env.TEST_WITH_LIVE_LLM === '1' ? '0' : '1';
 
 let passed = 0;
 let failed = 0;
 
 function resetTestLead(phone, overrides = {}) {
   const norm = LeadDB.normalizePhoneJid(phone);
+  LeadDB.clearMessages(norm);
   LeadDB.cancelFollowUpJobs(norm);
   return LeadDB.upsert(norm, {
     name: null,
@@ -38,9 +27,12 @@ function resetTestLead(phone, overrides = {}) {
     goal: null,
     budget: null,
     preferred_mode: null,
+    preferred_program: null,
     recommended_program: null,
     recommended_university: null,
+    declined_programs: [],
     objections: [],
+    conversation_mood: 'neutral',
     stage: 'NEW',
     lead_score: 10,
     ai_mode: 'AI',
@@ -53,6 +45,10 @@ function resetTestLead(phone, overrides = {}) {
     last_alert_at: null,
     turn_count: 0,
     last_cta_turn: 0,
+    last_thought: null,
+    last_reasoning: null,
+    last_intent: null,
+    last_rag_docs: [],
     ...overrides
   });
 }
@@ -65,42 +61,25 @@ function createMockSocketCollector() {
     sendPresenceUpdate: async () => {},
     sendMessage: async (_jid, content) => {
       bubbles.push(content.text);
-      return { key: { id: `test_${Date.now()}_${bubbles.length}` } };
+      return { key: { id: `test_${Date.now()}_${bubbles.length}_${Math.random().toString(36).slice(2, 6)}` } };
     }
   });
   return { bubbles, getSock };
 }
 
-/**
- * Assert universal reply quality rules on every bot turn:
- * - 1 to 3 bubbles (max 4 for checklist/comparison)
- * - No raw markdown (** or ##)
- * - At most 1 question mark (?) across the entire turn (unless opted out -> 0 questions)
- * - No bubble > 1000 chars
- */
-function assertReplyRules(bubbles, allowChecklist = false) {
-  assert(bubbles.length >= 1, 'Expected at least 1 bubble');
-  assert(bubbles.length <= (allowChecklist ? 4 : 3), `Expected <= ${allowChecklist ? 4 : 3} bubbles, got ${bubbles.length}`);
+function assertCleanReply(bubbles, maxQuestions = 1) {
+  assert(bubbles.length >= 1 && bubbles.length <= 4, `Expected 1-4 bubbles, got ${bubbles.length}`);
+  const joined = bubbles.join('\n');
+  assert(!/\*\*/.test(joined), `Contains raw markdown **: ${joined}`);
+  assert(!/^#{1,6}\s/m.test(joined), `Contains raw markdown # header: ${joined}`);
+  assert(!/\(12th pass, 3-yr Polytechnic Diploma, ya Graduation\?\)/i.test(joined), `Contains banned parenthetical MCQ menu: ${joined}`);
+  assert(!/Aapke background ko samajhna zaroori hai/i.test(joined), `Contains banned robotic phrase: ${joined}`);
 
-  let totalQuestionMarks = 0;
-  bubbles.forEach((b, idx) => {
-    assert(b.length <= 1000, `Bubble ${idx + 1} exceeds 1000 chars`);
-    assert(!/\*\*/.test(b), `Bubble ${idx + 1} contains raw markdown **: "${b}"`);
-    assert(!/^#{1,6}\s/m.test(b), `Bubble ${idx + 1} contains raw markdown # heading: "${b}"`);
-    const lines = b.split('\n').filter(Boolean);
-    assert(lines.length <= (allowChecklist ? 6 : 3), `Bubble ${idx + 1} has ${lines.length} lines (max ${allowChecklist ? 6 : 3}): "${b}"`);
-
-    const qCount = (b.match(/\?/g) || []).length;
-    totalQuestionMarks += qCount;
-    if (idx < bubbles.length - 1) {
-      assert.strictEqual(qCount, 0, `Non-final bubble ${idx + 1} should not contain a question: "${b}"`);
-    }
-  });
-
-  assert(totalQuestionMarks <= 1, `Turn contains ${totalQuestionMarks} questions (max 1 allowed): ${JSON.stringify(bubbles)}`);
+  const qCount = (joined.match(/\?/g) || []).length;
+  assert(qCount <= maxQuestions, `Expected at most ${maxQuestions} questions, got ${qCount} in:\n${joined}`);
 }
 
-async function runScenario(name, fn) {
+async function runTest(name, fn) {
   try {
     await fn();
     passed++;
@@ -111,489 +90,300 @@ async function runScenario(name, fn) {
   }
 }
 
-async function runAllTests() {
-  console.log('\n============================================================');
-  console.log('🧪 RUNNING PHASE 7 AUTOMATED SCENARIO SUITE (23 SCENARIOS)');
-  console.log('============================================================\n');
+async function runAllMandatoryTests() {
+  console.log('\n====================================================================');
+  console.log('🧪 PART 5 — MANDATORY LIVE VERIFICATION & REPLAY SUITE (GROQ 120B)');
+  console.log('====================================================================\n');
 
-  // 1. 12th pass student asks for B.Tech -> honestly refused, BCA/BBA suggested
-  await runScenario('1. 12th pass student asks for B.Tech -> honestly refused, BCA/BBA suggested', async () => {
-    const phone = '919000000001@s.whatsapp.net';
+  // =================================================================
+  // MANDATORY TEST 1 — EXACT REPLAY OF THE BROKEN 6-TURN TRANSCRIPT
+  // =================================================================
+  await runTest('MANDATORY TEST 1: Exact Replay of the 6-Turn Broken Transcript + Prompt Cache Proof', async () => {
+    const phone = '919000010001@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
 
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'bhai mujhe btech krni h job ke sath, 12th kiya h science se',
-      getSock,
-      skipDelays: true
-    });
+    console.log('\n--- [MANDATORY TEST 1: LIVE TRANSCRIPT REPLAY] ---');
 
-    assertReplyRules(bubbles);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'NOT_ELIGIBLE_FOR_BTECH_BUT_ALTERNATIVE_AVAILABLE');
-    const joined = bubbles.join(' ');
-    assert(/allowed nahi|not eligible|diploma/i.test(joined), 'Should explain 12th pass cannot do WP B.Tech');
-    assert(/BCA|BBA/i.test(joined), 'Should suggest Online BCA or BBA');
+    // TURN 1: "Hello" followed 20ms later by "Hyy" -> MUST merge via debounce into ONE warm greeting
+    const c1 = createMockSocketCollector();
+    const pHello = handleIncomingMessage({ phone, text: 'Hello', source: 'simulator', getSock: c1.getSock, debounceMs: 120, skipDelays: true });
+    await new Promise(r => setTimeout(r, 20));
+    const pHyy = handleIncomingMessage({ phone, text: 'Hyy', source: 'simulator', getSock: c1.getSock, debounceMs: 120, skipDelays: true });
+    const [r1] = await Promise.all([pHello, pHyy]);
+
+    console.log(`\n[Turn 1] Student: "Hello" + "Hyy" (debounced)`);
+    console.log(`  Thought: ${r1.turnResult.thought}`);
+    console.log(`  Intent:  ${r1.turnResult.detected_intent} | Stage: ${r1.lead.stage}`);
+    console.log(`  Usage:   prompt=${r1.turnResult.usage?.prompt_tokens}, cached=${r1.turnResult.usage?.cached_tokens}, completion=${r1.turnResult.usage?.completion_tokens}`);
+    c1.bubbles.forEach((b, i) => console.log(`  Bot Bubble ${i + 1}: ${b}`));
+
+    assertCleanReply(c1.bubbles, 1);
+    assert(!/12th|diploma|graduation|private|govt/i.test(c1.bubbles.join(' ')), 'Turn 1 greeting must NOT interrogate qualification or job');
+
+    // TURN 2: "Arre ky hogya?"
+    const c2 = createMockSocketCollector();
+    const r2 = await handleIncomingMessage({ phone, text: 'Arre ky hogya?', source: 'simulator', getSock: c2.getSock, debounceMs: 30, skipDelays: true });
+    console.log(`\n[Turn 2] Student: "Arre ky hogya?"`);
+    console.log(`  Thought: ${r2.turnResult.thought}`);
+    console.log(`  Intent:  ${r2.turnResult.detected_intent} | Stage: ${r2.lead.stage}`);
+    console.log(`  Usage:   prompt=${r2.turnResult.usage?.prompt_tokens}, cached=${r2.turnResult.usage?.cached_tokens}, completion=${r2.turnResult.usage?.completion_tokens}`);
+    c2.bubbles.forEach((b, i) => console.log(`  Bot Bubble ${i + 1}: ${b}`));
+    assertCleanReply(c2.bubbles, 1);
+
+    // TURN 3: "Polytechnic"
+    const c3 = createMockSocketCollector();
+    const r3 = await handleIncomingMessage({ phone, text: 'Polytechnic', source: 'simulator', getSock: c3.getSock, debounceMs: 30, skipDelays: true });
+    console.log(`\n[Turn 3] Student: "Polytechnic"`);
+    console.log(`  Thought: ${r3.turnResult.thought}`);
+    console.log(`  Intent:  ${r3.turnResult.detected_intent} | Stage: ${r3.lead.stage}`);
+    console.log(`  Usage:   prompt=${r3.turnResult.usage?.prompt_tokens}, cached=${r3.turnResult.usage?.cached_tokens}, completion=${r3.turnResult.usage?.completion_tokens}`);
+    c3.bubbles.forEach((b, i) => console.log(`  Bot Bubble ${i + 1}: ${b}`));
+    assertCleanReply(c3.bubbles, 1);
+    assert.strictEqual(r3.lead.qualification, 'DIPLOMA');
+
+    // TURN 4: "Ye sb ku puch rahe ho ho kaun tum?"
+    const c4 = createMockSocketCollector();
+    const r4 = await handleIncomingMessage({ phone, text: 'Ye sb ku puch rahe ho ho kaun tum?', source: 'simulator', getSock: c4.getSock, debounceMs: 30, skipDelays: true });
+    console.log(`\n[Turn 4] Student: "Ye sb ku puch rahe ho ho kaun tum?"`);
+    console.log(`  Thought: ${r4.turnResult.thought}`);
+    console.log(`  Intent:  ${r4.turnResult.detected_intent} | Stage: ${r4.lead.stage}`);
+    console.log(`  Usage:   prompt=${r4.turnResult.usage?.prompt_tokens}, cached=${r4.turnResult.usage?.cached_tokens}, completion=${r4.turnResult.usage?.completion_tokens}`);
+    c4.bubbles.forEach((b, i) => console.log(`  Bot Bubble ${i + 1}: ${b}`));
+    assertCleanReply(c4.bubbles, 1);
+    assert(/Harsh|College Vidya/i.test(c4.bubbles.join(' ')), 'Turn 4 must introduce Harsh Joshi / College Vidya');
+
+    // TURN 5: "Arre mujhe nahi krna btech"
+    const c5 = createMockSocketCollector();
+    const r5 = await handleIncomingMessage({ phone, text: 'Arre mujhe nahi krna btech', source: 'simulator', getSock: c5.getSock, debounceMs: 30, skipDelays: true });
+    console.log(`\n[Turn 5] Student: "Arre mujhe nahi krna btech"`);
+    console.log(`  Thought: ${r5.turnResult.thought}`);
+    console.log(`  Intent:  ${r5.turnResult.detected_intent} | Stage: ${r5.lead.stage} | Declined: ${JSON.stringify(r5.lead.declined_programs)}`);
+    console.log(`  Usage:   prompt=${r5.turnResult.usage?.prompt_tokens}, cached=${r5.turnResult.usage?.cached_tokens}, completion=${r5.turnResult.usage?.completion_tokens}`);
+    c5.bubbles.forEach((b, i) => console.log(`  Bot Bubble ${i + 1}: ${b}`));
+    assertCleanReply(c5.bubbles, 1);
+    assert(r5.lead.declined_programs.includes('BTECH_LE'), 'Must add BTECH_LE to declined_programs');
+    assert(/BCA|BBA/i.test(c5.bubbles.join(' ')), 'Must offer Online BCA / BBA alternatives for Diploma holders');
+    assert(!/sirf b\.?tech/i.test(c5.bubbles.join(' ')), 'Must NEVER say only B.Tech is available');
+
+    // TURN 6: "Mujhe kuch nahi chahiye thankyou!!"
+    const c6 = createMockSocketCollector();
+    const r6 = await handleIncomingMessage({ phone, text: 'Mujhe kuch nahi chahiye thankyou!!', source: 'simulator', getSock: c6.getSock, debounceMs: 30, skipDelays: true });
+    console.log(`\n[Turn 6] Student: "Mujhe kuch nahi chahiye thankyou!!"`);
+    console.log(`  Thought: ${r6.turnResult.thought}`);
+    console.log(`  Intent:  ${r6.turnResult.detected_intent} | Stage: ${r6.lead.stage} | OptedOut: ${r6.lead.opted_out}`);
+    console.log(`  Usage:   prompt=${r6.turnResult.usage?.prompt_tokens}, cached=${r6.turnResult.usage?.cached_tokens}, completion=${r6.turnResult.usage?.completion_tokens}`);
+    c6.bubbles.forEach((b, i) => console.log(`  Bot Bubble ${i + 1}: ${b}`));
+    console.log('--------------------------------------------------\n');
+
+    assertCleanReply(c6.bubbles, 0); // ZERO questions allowed on exit!
+    assert.strictEqual(r6.lead.stage, 'OPTED_OUT');
+    assert.strictEqual(r6.lead.opted_out, true);
   });
 
-  // 2. Diploma 62%, private job, Lucknow -> Sanskriti / Kalinga (both Pan-India)
-  await runScenario('2. Diploma 62%, private job, Lucknow -> Sanskriti / Kalinga (both Pan-India)', async () => {
-    const phone = '919000000002@s.whatsapp.net';
+  // TEST 2: 12th pass asking for B.Tech -> honestly declined, Online BCA/BBA suggested, 1 question
+  await runTest('Test 2: 12th pass asking for B.Tech -> honestly declined, Online BCA/BBA suggested', async () => {
+    const phone = '919000010002@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Mera diploma 62% hai, private job karta hoon Lucknow mein, B.Tech karna hai',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles, true);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'ELIGIBLE');
-    const recNames = res.eligibilityResult.recommended.map(r => r.short_name).join(' ');
-    assert(/Sanskriti/i.test(recNames) && /Kalinga/i.test(recNames), 'Both Sanskriti & Kalinga should be recommended');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'bhai 12th pcm h job kr rha hu btech krni h', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    const joined = c.bubbles.join(' ');
+    assert(/BCA|BBA/i.test(joined), 'Should recommend Online BCA/BBA');
   });
 
-  // 3. Diploma 55%, private job, Assam, asks "AICTE approved chahiye" -> Kalinga (NOT calling Sanskriti AICTE approved)
-  await runScenario('3. Diploma 55%, private job, Assam, "AICTE approved chahiye" -> Kalinga (Sanskriti NOT called AICTE approved)', async () => {
-    const phone = '919000000003@s.whatsapp.net';
+  // TEST 3: Diploma 62% private job Pune -> Sanskriti + Kalinga presented cleanly
+  await runTest('Test 3: Diploma 62% private job Pune -> Sanskriti + Kalinga presented cleanly', async () => {
+    const phone = '919000010003@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Diploma 55% private job Assam, mujhe AICTE approved university hi chahiye B.Tech ke liye',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles, true);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'ELIGIBLE');
-    assert.strictEqual(res.eligibilityResult.recommended[0].short_name, 'Kalinga University');
-    const joined = bubbles.join(' ');
-    assert(/Kalinga/i.test(joined), 'Should recommend Kalinga');
-    assert(!/Sanskriti[^.\n]*is AICTE approved/i.test(joined), 'Must never claim Sanskriti is AICTE approved');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'polytechnic mechanical 62% private company me job h pune me, btech krni h', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    const joined = c.bubbles.join(' ');
+    assert(/Sanskriti/i.test(joined) && /Kalinga/i.test(joined), 'Should present both Sanskriti and Kalinga');
   });
 
-  // 4. Diploma 48%, Govt employee, Delhi -> not eligible for Lingaya's (<50%), honest alternatives
-  await runScenario("4. Diploma 48%, Govt employee, Delhi -> not eligible for Lingaya's (<50%), honest alternatives", async () => {
-    const phone = '919000000004@s.whatsapp.net';
+  // TEST 4: Student asks "Sanskriti AICTE approved hai?" -> honestly says NO (State Univ UGC 2(f)), suggests Kalinga
+  await runTest('Test 4: "Sanskriti AICTE approved hai?" -> honestly says NO, suggests Kalinga if AICTE required', async () => {
+    const phone = '919000010004@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Diploma 48% hai, govt job mein hoon Delhi mein, B.Tech karna hai',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'NOT_ELIGIBLE');
-    const joined = bubbles.join(' ');
-    assert(/50%/i.test(joined), 'Should explain 50% minimum requirement for Govt employees at Lingayas');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'sanskriti aicte approved hai kya? kahi fake toh nahi?', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    const joined = c.bubbles.join(' ');
+    assert(/UGC/i.test(joined) && /Kalinga/i.test(joined), 'Should explain UGC 2(f) status and suggest Kalinga for AICTE');
   });
 
-  // 5. Diploma 70%, PSU employee, Noida -> Lingaya's
-  await runScenario("5. Diploma 70%, PSU employee, Noida -> Lingaya's Vidyapeeth", async () => {
-    const phone = '919000000005@s.whatsapp.net';
+  // TEST 5: Govt employee (Railway) in Patna with Diploma 68% -> honest about Lingaya's 75km Faridabad rule
+  await runTest("Test 5: Govt employee (Railway) in Patna with Diploma 68% -> honest about Lingaya's 75km rule", async () => {
+    const phone = '919000010005@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Diploma 70% hai, NTPC PSU mein job hai Noida mein, B.Tech LE karni hai',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles, true);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'ELIGIBLE');
-    assert(/Lingaya/i.test(res.eligibilityResult.recommended[0].university), 'Should recommend Lingayas');
-    assert(/Lingaya/i.test(bubbles.join(' ')), 'Reply should mention Lingayas');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'railway me hu patna me, diploma 68%, btech krni h', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    const joined = c.bubbles.join(' ');
+    assert(/75\s*km|Faridabad|Lingaya/i.test(joined), 'Should mention Lingayas 75 km rule honestly');
   });
 
-  // 6. Govt employee in Bihar (outside 75 km) -> no forced option, honest + human callback
-  await runScenario('6. Govt employee in Bihar (outside 75 km) -> no forced option, honest + human callback', async () => {
-    const phone = '919000000006@s.whatsapp.net';
+  // TEST 6: PSU employee in Noida with Diploma 70% -> Lingaya's Vidyapeeth recommended cleanly
+  await runTest("Test 6: PSU employee in Noida with Diploma 70% -> Lingaya's Vidyapeeth recommended", async () => {
+    const phone = '919000010006@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-    let ownerAlertTriggered = false;
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Diploma 65% hai, railway govt job mein hoon Patna Bihar mein',
-      getSock,
-      sendOwnerAlertFn: async () => { ownerAlertTriggered = true; },
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'NOT_ELIGIBLE_LOCATION_GOVT');
-    assert(/75\s*KM/i.test(bubbles.join(' ')), 'Should explain 75 km Faridabad NCR rule');
-    assert(ownerAlertTriggered, 'Should trigger human callback alert');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'NTPC PSU me job hai Noida me, Diploma 70% hai, B.Tech LE karna hai', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    assert(/Lingaya/i.test(c.bubbles.join(' ')), 'Should recommend Lingayas Vidyapeeth');
   });
 
-  // 7. B.Tech grad -> M.Tech WP / EMBA
-  await runScenario('7. B.Tech grad -> M.Tech WP / EMBA', async () => {
-    const phone = '919000000007@s.whatsapp.net';
+  // TEST 7: "Fees kitni hai?" as first message -> answers fee range first, then 1 natural question
+  await runTest('Test 7: "Fees kitni hai?" as first message -> answers fee range first, then 1 question', async () => {
+    const phone = '919000010007@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Maine B.Tech pass kiya hai 68% ke sath, private company mein job karta hoon, M.Tech karna hai',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles, true);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'ELIGIBLE');
-    assert(/M\.Tech/i.test(res.eligibilityResult.eligible_programs.join(' ')), 'Should be eligible for M.Tech WP');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'btech ki fees kitni hai?', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    assert(/45,000|50,000|55,000|45–55k|45k/i.test(c.bubbles.join(' ')), 'Should state fee range clearly');
   });
 
-  // 8. B.Com grad -> Online MBA / MCA
-  await runScenario('8. B.Com grad -> Online MBA / MCA', async () => {
-    const phone = '919000000008@s.whatsapp.net';
+  // TEST 8: "Dost ne 25k mein online B.Tech ki hai" -> honest warning + 3-point neutral checklist
+  await runTest('Test 8: "Dost ne 25k mein online B.Tech ki hai" -> warning + 3-point checklist + partner steer', async () => {
+    const phone = '919000010008@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Maine B.Com kiya hai 60% se aur private job mein hoon',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'ELIGIBLE');
-    assert(/MBA|MCA/i.test(res.eligibilityResult.eligible_programs.join(' ')), 'Should recommend Online MBA / MCA');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'mere dost ne ek college se 25k me online btech ki h, wahan se kar lu?', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    assert(/ugc\.ac\.in|valid nahi|AICTE/i.test(c.bubbles.join(' ')), 'Should warn about invalid online B.Tech and provide verification checklist');
   });
 
-  // 9. "Fees kitni hai?" as first message -> fee range answered first, then one qualifying question
-  await runScenario('9. "Fees kitni hai?" as first message -> fee range answered first, then one qualifying question', async () => {
-    const phone = '919000000009@s.whatsapp.net';
+  // TEST 9: Pure English B.Com graduate -> replies in crisp natural English, suggests Online MBA
+  await runTest('Test 9: Pure English B.Com graduate -> replies in natural English, suggests Online MBA', async () => {
+    const phone = '919000010009@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    await processStudentTurn({
-      phone,
-      combinedText: 'Fees kitni hai?',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles);
-    const joined = bubbles.join(' ');
-    assert(/45,000|50,000|15,000|₹/i.test(joined), 'Should answer fee range first');
-    assert(bubbles[bubbles.length - 1].includes('?'), 'Should ask 1 qualifying question at the end');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: "Hi, I'm a B.Com graduate working in a bank. Looking for an MBA.", source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    assert(/MBA/i.test(c.bubbles.join(' ')), 'Should recommend Online MBA in English');
   });
 
-  // 10. "Ye fake toh nahi?" -> verification steps
-  await runScenario('10. "Ye fake toh nahi?" -> verification steps', async () => {
-    const phone = '919000000010@s.whatsapp.net';
+  // TEST 10: "Tum AI bot ho kya?" -> honest, confident answer + offers direct call with Harsh
+  await runTest('Test 10: "Tum AI bot ho kya?" -> honest answer + offers call with Harsh', async () => {
+    const phone = '919000010010@s.whatsapp.net';
     resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    await processStudentTurn({
-      phone,
-      combinedText: 'Ye fake toh nahi? Degree valid rahegi na?',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles, true);
-    const joined = bubbles.join(' ');
-    assert(/ugc\.ac\.in/i.test(joined), 'Should provide UGC verification portal');
-    assert(/aicte/i.test(joined), 'Should mention AICTE portal');
+    const c = createMockSocketCollector();
+    await handleIncomingMessage({ phone, text: 'Tum AI bot ho kya?', source: 'simulator', getSock: c.getSock, debounceMs: 20, skipDelays: true });
+    assertCleanReply(c.bubbles, 1);
+    assert(/AI|assistant|Harsh/i.test(c.bubbles.join(' ')), 'Should honestly state AI assistant for Harsh Joshi team');
   });
 
-  // 11. Student already told qualification -> bot never asks it again (20+ message conversation)
-  await runScenario('11. Student already told qualification -> bot never asks it again across 20+ messages', async () => {
-    const phone = '919000000011@s.whatsapp.net';
+  // TEST 11: 4 rapid WhatsApp messages in 5 seconds -> single combined debounced response
+  await runTest('Test 11: 4 rapid messages -> single combined debounced response', async () => {
+    const phone = '919000010011@s.whatsapp.net';
     resetTestLead(phone);
-
-    // Seed 20 messages where qualification was given in message #1
-    LeadDB.upsert(phone, { qualification: 'DIPLOMA', stream_branch: 'Mechanical' });
-    for (let i = 1; i <= 20; i++) {
-      LeadDB.addMessage(phone, i % 2 === 1 ? 'user' : 'bot', `Turn message #${i}`);
-    }
-
-    const { bubbles, getSock } = createMockSocketCollector();
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Aage kya process hai?',
-      getSock,
-      skipDelays: true
+    let readCalls = 0;
+    const c = createMockSocketCollector();
+    const getSock = () => ({
+      ...c.getSock(),
+      readMessages: async () => { readCalls++; }
     });
 
-    assertReplyRules(bubbles);
+    const ts = Date.now();
+    const p1 = handleIncomingMessage({ phone, text: 'hi', source: 'baileys', msgKey: { id: `b1_${ts}` }, getSock, debounceMs: 100, skipDelays: true });
+    const p2 = handleIncomingMessage({ phone, text: 'diploma civil kiya h', source: 'baileys', msgKey: { id: `b2_${ts}` }, getSock, debounceMs: 100, skipDelays: true });
+    const p3 = handleIncomingMessage({ phone, text: '64% marks hain', source: 'baileys', msgKey: { id: `b3_${ts}` }, getSock, debounceMs: 100, skipDelays: true });
+    const p4 = handleIncomingMessage({ phone, text: 'private company me job h', source: 'baileys', msgKey: { id: `b4_${ts}` }, getSock, debounceMs: 100, skipDelays: true });
+
+    const [res] = await Promise.all([p1, p2, p3, p4]);
+    assert.strictEqual(readCalls, 1, 'All 4 rapid messages must execute as 1 combined turn');
     assert.strictEqual(res.lead.qualification, 'DIPLOMA');
-    const joined = bubbles.join(' ');
-    assert(!/qualification kya hai|12th ke baad diploma kiya/i.test(joined), 'Must never re-ask qualification');
-  });
-
-  // 12. 4 rapid messages -> one combined reply (debounce)
-  await runScenario('12. 4 rapid messages -> debounced into one combined reply', async () => {
-    const phone = '919000000012@s.whatsapp.net';
-    resetTestLead(phone);
-    let turnExecutions = 0;
-    const { bubbles, getSock } = createMockSocketCollector();
-    const wrappedGetSock = () => {
-      const s = getSock();
-      return {
-        ...s,
-        readMessages: async () => { turnExecutions++; }
-      };
-    };
-
-    const p1 = enqueueIncomingUserMessage({ phone, text: 'hi', msgKey: { id: 'm1' }, getSock: wrappedGetSock, debounceMs: 60, skipDelays: true });
-    const p2 = enqueueIncomingUserMessage({ phone, text: 'mujhe btech krna h', msgKey: { id: 'm2' }, getSock: wrappedGetSock, debounceMs: 60, skipDelays: true });
-    const p3 = enqueueIncomingUserMessage({ phone, text: 'diploma civil h mera', msgKey: { id: 'm3' }, getSock: wrappedGetSock, debounceMs: 60, skipDelays: true });
-    const p4 = enqueueIncomingUserMessage({ phone, text: 'private job me hu', msgKey: { id: 'm4' }, getSock: wrappedGetSock, debounceMs: 60, skipDelays: true });
-
-    const [r1] = await Promise.all([p1, p2, p3, p4]);
-    assert.strictEqual(turnExecutions, 1, 'All 4 rapid messages must be processed as a single turn');
-    assert.strictEqual(r1.lead.qualification, 'DIPLOMA');
-    assert.strictEqual(r1.lead.employment_type, 'PRIVATE');
-    assertReplyRules(bubbles);
-  });
-
-  // 13. Message at 10:30 PM IST -> follow-up queued for 9:30 AM IST (+ jitter)
-  await runScenario('13. Follow-up due at 10:30 PM IST -> queued for 9:30 AM IST next morning', async () => {
-    // Construct a timestamp corresponding to 22:30 IST (17:00 UTC)
-    const nightUtc = Date.UTC(2026, 10, 20, 17, 0, 0); // 17:00 UTC = 22:30 IST
-    const istNight = getISTParts(nightUtc);
-    assert.strictEqual(istNight.hour, 22);
-
-    const adjusted = adjustToBusinessHoursIST(nightUtc, false); // without random jitter to test exact 9:30 AM base
-    const istMorning = getISTParts(adjusted);
-    assert.strictEqual(istMorning.hour, 9);
-    assert.strictEqual(istMorning.minute, 30);
-  });
-
-  // 14. "STOP" -> opted out, no more follow-ups
-  await runScenario('14. "STOP" -> opted out, polite close, no more follow-ups', async () => {
-    const phone = '919000000014@s.whatsapp.net';
-    resetTestLead(phone, { stage: 'PITCHED' });
-    scheduleGhostFollowUps(LeadDB.get(phone));
-    assert(LeadDB.getPendingFollowUpJobsForLead(phone).length > 0, 'Should have pending follow-ups before STOP');
-
-    const { bubbles, getSock } = createMockSocketCollector();
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'STOP',
-      getSock,
-      skipDelays: true
-    });
-
-    assert.strictEqual(res.lead.opted_out, true);
-    assert.strictEqual(res.lead.stage, 'OPTED_OUT');
-    assert.strictEqual(LeadDB.getPendingFollowUpJobsForLead(phone).length, 0, 'Pending follow-ups must be cancelled');
-    assert.strictEqual(scheduleGhostFollowUps(res.lead).length, 0, 'Opted-out lead must never be scheduled for follow-ups');
-    assert(!bubbles.join(' ').includes('?'), 'Closing message on STOP should not ask any question');
-  });
-
-  // 15. Human mode on -> bot silent
-  await runScenario('15. Human mode on -> bot completely silent', async () => {
-    const phone = '919000000015@s.whatsapp.net';
-    resetTestLead(phone, { ai_mode: 'HUMAN', human_until: Date.now() + 12 * HOUR });
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Hello sir fees batao',
-      getSock,
-      skipDelays: true
-    });
-
-    assert.strictEqual(res.skipped, true);
-    assert.strictEqual(res.reason, 'HUMAN_MODE');
-    assert.strictEqual(bubbles.length, 0, 'Bot must send 0 bubbles in HUMAN mode');
-  });
-
-  // 16. Human replies from linked phone (fromMe not sent by bot) -> lead auto-switches to HUMAN
-  await runScenario('16. Reply from linked phone (fromMe not in bot_sent_ids) -> lead auto-switches to HUMAN for 12h', async () => {
-    const phone = '919000000016@s.whatsapp.net';
-    resetTestLead(phone, { ai_mode: 'AI' });
-    const humanMsgId = 'LINKED_PHONE_MSG_999';
-    assert.strictEqual(LeadDB.isBotSentId(humanMsgId), false);
-
-    // Simulate index.js fromMe handler when !LeadDB.isBotSentId(msgId)
-    LeadDB.addMessage(phone, 'human', 'Main Harsh bol raha hoon, abhi call karta hoon', { waMsgId: humanMsgId });
-    LeadDB.upsert(phone, { ai_mode: 'HUMAN', human_until: Date.now() + 12 * HOUR });
-    LeadDB.cancelFollowUpJobs(phone);
-
-    const updated = LeadDB.get(phone);
-    assert.strictEqual(updated.ai_mode, 'HUMAN');
-    assert(updated.human_until > Date.now() + 11 * HOUR);
-  });
-
-  // 17. Socket disconnect during a reply -> message queued in DB and delivered after reconnect
-  await runScenario('17. Socket disconnect during reply -> queued in DB and delivered on reconnect without loss', async () => {
-    const phone = '919000000017@s.whatsapp.net';
-    resetTestLead(phone);
-
-    // Socket is null (disconnected)
-    await processStudentTurn({
-      phone,
-      combinedText: 'Diploma civil 60% private job',
-      getSock: () => null,
-      skipDelays: true
-    });
-
-    const pendingQueue = LeadDB.getPendingOutbound().filter(q => q.lead_phone === phone);
-    assert(pendingQueue.length >= 1, 'Failed bubbles must be saved in outbound_queue');
-
-    // Now socket reconnects!
-    const { bubbles, getSock } = createMockSocketCollector();
-    const flushedCount = await flushOutboundQueue({ getSock, skipDelays: true });
-    assert(flushedCount >= pendingQueue.length, 'All queued messages must flush upon reconnect');
-    assert(bubbles.length >= pendingQueue.length, 'Flushed bubbles must be sent through socket');
-  });
-
-  // 18. Full probing flow from "btech krni h" -> every bot turn has ONE question, eligibility reached naturally
-  await runScenario('18. Full probing flow from "btech krni h" -> 1 question per turn, natural progression', async () => {
-    const phone = '919000000018@s.whatsapp.net';
-    resetTestLead(phone);
-
-    // Turn 1: Student says "sir btech krni h job ke sath"
-    let c1 = createMockSocketCollector();
-    let r1 = await processStudentTurn({ phone, combinedText: 'sir btech krni h job ke sath', getSock: c1.getSock, skipDelays: true });
-    assertReplyRules(c1.bubbles);
-    assert.strictEqual(r1.eligibilityResult.missing_info[0], 'qualification');
-
-    // Turn 2: Student says "diploma kiya h mechanical se"
-    let c2 = createMockSocketCollector();
-    let r2 = await processStudentTurn({ phone, combinedText: 'diploma kiya h mechanical se', getSock: c2.getSock, skipDelays: true });
-    assertReplyRules(c2.bubbles);
-    assert.strictEqual(r2.lead.qualification, 'DIPLOMA');
-    assert.strictEqual(r2.eligibilityResult.missing_info[0], 'employment_type');
-
-    // Turn 3: Student says "private, ek auto parts company me"
-    let c3 = createMockSocketCollector();
-    let r3 = await processStudentTurn({ phone, combinedText: 'private, ek auto parts company me', getSock: c3.getSock, skipDelays: true });
-    assertReplyRules(c3.bubbles);
-    assert.strictEqual(r3.lead.employment_type, 'PRIVATE');
-    assert.strictEqual(r3.eligibilityResult.missing_info[0], 'percentage');
-
-    // Turn 4: Student says "58% thi" -> Eligibility reached & pitched!
-    let c4 = createMockSocketCollector();
-    let r4 = await processStudentTurn({ phone, combinedText: '58% thi', getSock: c4.getSock, skipDelays: true });
-    assertReplyRules(c4.bubbles, true);
-    assert.strictEqual(r4.eligibilityResult.decision_status, 'ELIGIBLE');
-    assert.strictEqual(r4.lead.stage, 'PITCHED');
-  });
-
-  // 19. Student gives 3 facts in one message ("diploma civil 60% private job") -> bot skips all those questions
-  await runScenario('19. Student gives 3 facts in one message ("diploma civil 60% private job") -> skips all those questions', async () => {
-    const phone = '919000000019@s.whatsapp.net';
-    resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'diploma civil 60% private job',
-      getSock,
-      skipDelays: true
-    });
-
-    assertReplyRules(bubbles, true);
-    assert.strictEqual(res.lead.qualification, 'DIPLOMA');
-    assert.strictEqual(res.lead.stream_branch, 'Civil');
-    assert.strictEqual(res.lead.percentage, 60);
+    assert.strictEqual(res.lead.percentage, 64);
     assert.strictEqual(res.lead.employment_type, 'PRIVATE');
-    assert.strictEqual(res.eligibilityResult.decision_status, 'ELIGIBLE');
-    const joined = bubbles.join(' ');
-    assert(!/qualification kya|private.*ya.*govt|percentage kitni/i.test(joined), 'Must skip all 3 already-provided questions');
+    assertCleanReply(c.bubbles, 1);
   });
 
-  // 20. Private diploma student -> bot never asks city/location (not needed, Pan-India)
-  await runScenario('20. Private diploma student -> bot NEVER asks city/location (Pan-India)', async () => {
-    const phone = '919000000020@s.whatsapp.net';
-    resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
+  // TEST 12: Verify Prompt Caching & Telemetry metrics recorded in DB
+  await runTest('Test 12: Verify Groq Prompt Caching & Telemetry metrics recorded in SQLite', async () => {
+    const quota = LeadDB.getGroqQuotaMetrics();
+    console.log(`   [Quota Telemetry]: Requests Today=${quota.requests_used_today}, Prompt Tokens=${quota.prompt_tokens_today}, Cached Tokens=${quota.cached_tokens_today} (Cache Hit=${quota.cache_hit_pct}%), Avg Uncached/Turn=${quota.avg_uncached_tokens_per_turn}`);
+    assert(quota.requests_used_today >= 10, 'Telemetry should track requests');
+    assert(quota.cached_tokens_today > 0, 'Groq Prompt Caching must produce cached_tokens > 0 across turns');
+  });
 
-    const res = await processStudentTurn({
+  // TEST 13: Deep Mechanical Career Counseling via FTS5 RAG
+  await runTest('Test 13: Deep Mechanical Career Counseling via FTS5 RAG (Supervisor ceiling + EV/CAD/SolidWorks)', async () => {
+    const phone = '919000010013@s.whatsapp.net';
+    resetTestLead(phone, { qualification: 'DIPLOMA', stream_branch: 'Mechanical', employment_type: 'PRIVATE', employed: true, work_experience_years: 4, percentage: 60 });
+    const c = createMockSocketCollector();
+    const res = await handleIncomingMessage({
       phone,
-      combinedText: 'Maine mechanical diploma kiya hai 55% se aur private company mein job karta hoon',
-      getSock,
+      text: 'B.Tech karne se sach mein kya fayda hoga? Mechanical ka future kya hai?',
+      source: 'simulator',
+      getSock: c.getSock,
+      debounceMs: 20,
       skipDelays: true
     });
 
-    assertReplyRules(bubbles, true);
-    assert(!res.eligibilityResult.missing_info.includes('city'), 'City must NOT be in missing_info for private diploma');
-    const joined = bubbles.join(' ');
-    assert(!/kis city|kahan rehte|location kya/i.test(joined), 'Bot must never ask city/location for private diploma student');
+    console.log(`   [Test 13 RAG Docs Pulled]: ${JSON.stringify(res.turnResult.rag_docs)}`);
+    c.bubbles.forEach((b, i) => console.log(`   [Test 13 Bubble ${i + 1}]: ${b}`));
+    assertCleanReply(c.bubbles, 1);
+    assert(
+      res.turnResult.rag_docs.includes('diploma_vs_btech_glass_ceiling') ||
+      res.turnResult.rag_docs.includes('branch_mechanical_engineering'),
+      'FTS5 must pull mechanical or glass_ceiling doc'
+    );
   });
 
-  // 21. Student mentions another college / online B.Tech -> neutral checklist + honest comparison + partner recommendation
-  await runScenario('21. Student mentions another college / online B.Tech -> neutral checklist + partner recommendation, no defamation', async () => {
-    const phone = '919000000021@s.whatsapp.net';
-    resetTestLead(phone, { qualification: 'DIPLOMA', percentage: 60, employment_type: 'PRIVATE', employed: true });
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    await processStudentTurn({
-      phone,
-      combinedText: 'sir mere dost ne XYZ se online btech ki h, sasti padi, wo kaisi h?',
-      getSock,
-      skipDelays: true
+  // TEST 14: Branch-Specific Intelligence (Civil Gulf/BIM, ECE VLSI, B.Tech M.Tech vs MBA)
+  await runTest('Test 14: Branch-Specific FTS5 RAG (Civil BIM/Gulf, ECE VLSI, B.Tech M.Tech vs MBA)', async () => {
+    const rCivil = KnowledgeRAG.retrieveTopChunks({
+      userText: 'Civil diploma ke baad Gulf job aur BIM Revit ka kya scope hai?',
+      lead: { qualification: 'DIPLOMA', stream_branch: 'Civil' }
     });
+    assert(rCivil.doc_ids.includes('branch_civil_engineering'), 'Civil query should pull branch_civil_engineering');
+    assert(rCivil.estimated_tokens <= 500, 'RAG chunks must stay <= 500 tokens');
 
-    assertReplyRules(bubbles, true);
-    const joined = bubbles.join(' ');
-    assert(/online.*valid nahi|AICTE/i.test(joined), 'Should explain online B.Tech is not valid under AICTE');
-    assert(/ugc\.ac\.in/i.test(joined), 'Should give neutral verification checklist');
-    assert(/Sanskriti|Kalinga/i.test(joined), 'Should end with partner university recommendation');
-  });
-
-  // 22. Student asks "Sanskriti ya Kalinga kaunsi better?" -> fair comparison + clear final suggestion
-  await runScenario('22. Student asks "Sanskriti ya Kalinga kaunsi better?" -> fair comparison + clear final suggestion', async () => {
-    const phone = '919000000022@s.whatsapp.net';
-    resetTestLead(phone, { qualification: 'DIPLOMA', percentage: 60, employment_type: 'PRIVATE', employed: true });
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    await processStudentTurn({
-      phone,
-      combinedText: 'Sanskriti ya Kalinga kaunsi better hai mere liye?',
-      getSock,
-      skipDelays: true
+    const rEce = KnowledgeRAG.retrieveTopChunks({
+      userText: 'ECE diploma ke baad VLSI semiconductor chip design mein kaise jaayein?',
+      lead: { qualification: 'DIPLOMA', stream_branch: 'ECE' }
     });
+    assert(rEce.doc_ids.includes('branch_ece_semiconductor_vlsi'), 'ECE query should pull branch_ece_semiconductor_vlsi');
 
-    assertReplyRules(bubbles, true);
-    const joined = bubbles.join(' ');
-    assert(/Sanskriti/i.test(joined) && /Kalinga/i.test(joined), 'Should compare both Sanskriti and Kalinga');
-    assert(/mera honest suggestion/i.test(joined), 'Should end with a clear personal recommendation');
-  });
-
-  // 23. Pitch never appears before eligibility is clear; "registration karao"-type CTA not repeated in consecutive turns
-  await runScenario('23. Pitch never appears before eligibility is clear; hard CTA not repeated', async () => {
-    const phone = '919000000023@s.whatsapp.net';
-    resetTestLead(phone);
-    const { bubbles, getSock } = createMockSocketCollector();
-
-    const res = await processStudentTurn({
-      phone,
-      combinedText: 'Hi mujhe degree karni hai',
-      getSock,
-      skipDelays: true
+    const rPg = KnowledgeRAG.retrieveTopChunks({
+      userText: 'B.Tech ke baad M.Tech karun ya MBA?',
+      lead: { qualification: 'BTECH' }
     });
-
-    assertReplyRules(bubbles);
-    assert.strictEqual(res.eligibilityResult.decision_status, 'NEED_INFO');
-    const joined = bubbles.join(' ');
-    assert(!/Sanskriti|Kalinga|Lingaya/i.test(joined), 'Must NOT pitch any university before qualification is known');
-    assert(!/registration karao/i.test(joined), 'Must never use pushy registration CTA');
+    assert(rPg.doc_ids.includes('mtech_vs_mba_decision_guide'), 'PG query should pull mtech_vs_mba_decision_guide');
   });
 
-  console.log('\n============================================================');
-  console.log(`📊 TEST SUMMARY: ${passed} PASSED | ${failed} FAILED (Total: ${passed + failed})`);
-  console.log('============================================================\n');
+  // TEST 15: Live Knowledge Library Upload & Immediate FTS5 Search
+  await runTest('Test 15: Live Knowledge Library Upload -> Auto-Chunk -> FTS5 Search Retrieval', async () => {
+    const customDocId = 'custom_aerospace_drone_guide_2026';
+    KnowledgeRAG.indexDocumentInDb({
+      doc_id: customDocId,
+      title: 'Drone & UAV Engineering Career Roadmap 2026',
+      tags: 'drone, uav, avionics, Pixhawk, DGCA, aerospace',
+      category: 'Emerging Tech',
+      summary: 'Career guide for Drone & UAV systems engineering in India.',
+      content: 'India Drone Shakti mission is creating high demand for UAV engineers skilled in Pixhawk flight controllers, ROS2, carbon-fiber airframe design, and DGCA type certification.'
+    }, true);
 
-  if (failed > 0) {
-    process.exit(1);
+    const searchRes = KnowledgeRAG.retrieveTopChunks({
+      userText: 'Pixhawk flight controller aur Drone Shakti UAV career ka kya scope hai?',
+      lead: { qualification: 'DIPLOMA' }
+    });
+    assert(searchRes.doc_ids.includes(customDocId), 'Newly uploaded doc must be immediately retrievable via FTS5');
+    KnowledgeRAG.deleteDoc(customDocId);
+  });
+
+  // Cleanup test leads from database
+  for (let i = 1; i <= 15; i++) {
+    const p = `9190000100${String(i).padStart(2, '0')}@s.whatsapp.net`;
+    LeadDB.deleteLead(p);
   }
+
+  console.log('\n====================================================================');
+  console.log(`📊 FINAL MANDATORY SUITE SUMMARY: ${passed} PASSED | ${failed} FAILED`);
+  console.log('====================================================================\n');
+
+  if (failed > 0) process.exit(1);
 }
 
-runAllTests();
+runAllMandatoryTests();

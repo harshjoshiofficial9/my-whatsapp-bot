@@ -11,6 +11,10 @@ services:
         value: production
       - key: PORT
         value: 3000
+      - key: TZ
+        value: Asia/Kolkata
+      - key: LLM_MODEL
+        value: openai/gpt-oss-120b
       - key: OWNER_NUMBER
         value: "917982412945"
       - key: CRM_USERNAME

@@ -1,5 +1,15 @@
 {
   "last_verified_date": "2026-11-20",
+  "brand": {
+    "name": "College Vidya",
+    "overview": "India's #1 unbiased online & working-professional university comparison and career counseling platform (100+ UGC-approved universities).",
+    "pillars": [
+      "100% Free Counseling — Zero hidden commission from students",
+      "Direct Admission & Fee Payment on the Official University Portal (Absolute Scam Protection)",
+      "Unbiased Side-by-Side Comparison of UGC/AICTE/NAAC Approvals & Fees",
+      "Dedicated Post-Admission Support until Degree Completion"
+    ]
+  },
   "verification_portals": {
     "ugc_universities": "https://www.ugc.ac.in",
     "ugc_fake_list": "https://www.ugc.ac.in/page/Fake-Universities.aspx",
@@ -14,13 +24,17 @@
       "name": "Sanskriti University",
       "short_name": "Sanskriti",
       "city": "Mathura, Uttar Pradesh",
+      "type": "State Private University",
       "status": "State Private University (UP Act No. 20 of 2016)",
       "approvals": {
         "ugc_2f": true,
         "ugc_12b": false,
+        "ugc_sec3_deemed": false,
+        "ugc_deb": false,
         "aicte_approved": false,
         "aiu_member": true,
-        "naac_grade": "B++ (CGPA 2.95)",
+        "naac_grade": "B++",
+        "naac_cgpa": "2.95/4.00",
         "nirf_rank": "101-150 (Innovation)"
       },
       "programs": [
@@ -56,7 +70,8 @@
         "type": "pan_india",
         "values": ["ALL"]
       },
-      "mode": "Weekend / Evening Flexible Shift (Regular Degree Mode, NOT Online/Distance)",
+      "mode": "Weekend / Evening Flexible Shift (Regular Mode, NOT Online/Distance)",
+      "exam_pattern": "Semester-wise exams with flexible weekend coordination for working professionals",
       "official_website": "https://www.sanskriti.edu.in",
       "installment_available": true,
       "best_for": "budget",
@@ -67,20 +82,24 @@
         "Weekend/flexible timing classes designed for working professionals",
         "100% direct fee payment on official university portal"
       ],
-      "compliance_notes": "NEVER claim Sanskriti is AICTE approved (aicte_approved is false). Explain honestly: it is a UGC 2(f) recognized State University established under the UP State Private Universities Act, 2016; State universities have degree-awarding authority under their own statute. Students can verify on ugc.ac.in. If a student specifically requires AICTE approval, recommend Kalinga (private job) or Lingaya's (Govt/PSU within 75 km)."
+      "compliance_notes": "NEVER claim Sanskriti is AICTE approved (aicte_approved is false). Explain honestly: it is a UGC 2(f) recognized State University established under the UP State Private Universities Act, 2016; State universities have degree-awarding authority under their own statute. Students can verify on ugc.ac.in. If a student specifically requires Direct AICTE approval, recommend Kalinga (private job) or Lingaya's (Govt/PSU within 75 km)."
     },
     {
       "id": "kalinga",
       "name": "Kalinga University",
       "short_name": "Kalinga",
       "city": "Naya Raipur, Chhattisgarh",
+      "type": "State Private University",
       "status": "State Private University (CG Act No. 8 of 2011)",
       "approvals": {
         "ugc_2f": true,
         "ugc_12b": true,
+        "ugc_sec3_deemed": false,
+        "ugc_deb": false,
         "aicte_approved": true,
         "aiu_member": true,
-        "naac_grade": "B+ (CGPA 2.60)",
+        "naac_grade": "B+",
+        "naac_cgpa": "2.60/4.00",
         "nirf_rank": "101-150 (University Category)"
       },
       "programs": [
@@ -118,6 +137,7 @@
         "previous_states": ["Delhi", "NCR", "Haryana", "Uttar Pradesh", "Chhattisgarh", "Madhya Pradesh", "Maharashtra", "Karnataka", "Telangana", "Andhra Pradesh", "Odisha", "Jharkhand"]
       },
       "mode": "Weekend / Evening Flexible Timing (Regular Mode, NOT Online/Distance)",
+      "exam_pattern": "Semester-wise exams with hybrid/weekend practical support",
       "official_website": "https://www.kalingauniversity.ac.in",
       "installment_available": true,
       "best_for": "AICTE needed",
@@ -134,14 +154,17 @@
       "name": "Lingaya's Vidyapeeth",
       "short_name": "Lingaya's",
       "city": "Faridabad, Haryana (Delhi-NCR)",
+      "type": "Deemed-to-be University",
       "status": "Deemed-to-be University (UGC Section 3, MHRD Notification 2009)",
       "approvals": {
         "ugc_2f": true,
         "ugc_12b": false,
         "ugc_sec3_deemed": true,
+        "ugc_deb": false,
         "aicte_approved": true,
         "aiu_member": true,
         "naac_grade": "A+",
+        "naac_cgpa": "3.30+/4.00",
         "nirf_rank": "Participated (Historical 151-200)"
       },
       "programs": [
@@ -180,11 +203,12 @@
         "allowed_ncr_cities": ["faridabad", "delhi", "new delhi", "noida", "greater noida", "gurgaon", "gurugram", "ghaziabad", "palwal", "ballabhgarh", "sonipat", "bahadurgarh", "ncr", "delhi ncr"]
       },
       "mode": "Weekend / Evening Flexible Shift (AICTE Working Professional Norms)",
+      "exam_pattern": "Semester exams at Faridabad campus as per AICTE norms",
       "official_website": "https://www.lingayasvidyapeeth.edu.in",
       "installment_available": true,
       "best_for": "govt employee",
       "usp_points": [
-        "ONLY partnered option eligible for Government & PSU employees (also open to Private)",
+        "ONLY partnered option eligible for Government & PSU employees (also open to NCR Private employees)",
         "Highest NAAC A+ accreditation & UGC Section 3 Deemed-to-be University",
         "Directly AICTE Approved for Working Professionals",
         "Ideal for professionals residing or working within 75 km of Faridabad (Delhi-NCR)"
@@ -193,9 +217,10 @@
     },
     {
       "id": "cv_online_partners",
-      "name": "College Vidya Online University Partners (Manipal, Amity, Uttaranchal, D.Y. Patil)",
+      "name": "College Vidya Online University Partners (Manipal Online, Amity Online, Uttaranchal Online, D.Y. Patil Online)",
       "short_name": "CV Online Partners",
       "city": "Pan-India (100% Online)",
+      "type": "UGC-DEB Entitled Online Universities",
       "status": "UGC-DEB Entitled & NAAC A+ / A++ Universities",
       "approvals": {
         "ugc_deb": true,
@@ -210,6 +235,7 @@
           "name": "Online BCA (Bachelor of Computer Applications)",
           "duration_years": 3,
           "semesters": 6,
+          "branches": ["Software Development", "Data Analytics", "Cloud & Security", "AI & ML"],
           "fee_per_sem_min": 15000,
           "fee_per_sem_max": 25000,
           "min_percentage_gen": 45,
@@ -221,6 +247,7 @@
           "name": "Online BBA (Bachelor of Business Administration)",
           "duration_years": 3,
           "semesters": 6,
+          "branches": ["General Management", "Finance", "Marketing", "HR", "Operations"],
           "fee_per_sem_min": 15000,
           "fee_per_sem_max": 25000,
           "min_percentage_gen": 45,
@@ -232,17 +259,31 @@
           "name": "Online B.Com",
           "duration_years": 3,
           "semesters": 6,
+          "branches": ["Accounting & Finance", "Banking"],
           "fee_per_sem_min": 12000,
           "fee_per_sem_max": 20000,
           "min_percentage_gen": 45,
           "min_percentage_reserved": 40,
-          "required_qualification": ["12TH_COMMERCE", "12TH_SCIENCE", "12TH_ARTS", "12TH"]
+          "required_qualification": ["12TH_COMMERCE", "12TH_SCIENCE", "12TH_ARTS", "12TH", "DIPLOMA"]
+        },
+        {
+          "code": "ONLINE_BA",
+          "name": "Online BA (Bachelor of Arts — Govt Exam / UPSC / SSC Track)",
+          "duration_years": 3,
+          "semesters": 6,
+          "branches": ["Economics", "Political Science", "Public Administration", "General"],
+          "fee_per_sem_min": 10000,
+          "fee_per_sem_max": 18000,
+          "min_percentage_gen": 40,
+          "min_percentage_reserved": 35,
+          "required_qualification": ["12TH_SCIENCE", "12TH_COMMERCE", "12TH_ARTS", "12TH", "DIPLOMA"]
         },
         {
           "code": "ONLINE_MCA",
           "name": "Online MCA (Master of Computer Applications)",
           "duration_years": 2,
           "semesters": 4,
+          "branches": ["Full Stack Development", "AI & Data Science", "Cloud Computing", "Cybersecurity"],
           "fee_per_sem_min": 25000,
           "fee_per_sem_max": 40000,
           "min_percentage_gen": 50,
@@ -254,6 +295,7 @@
           "name": "Online MBA / Executive MBA",
           "duration_years": 2,
           "semesters": 4,
+          "branches": ["Operations & Supply Chain", "Project Management", "Finance", "Business Analytics", "IT Management", "HR", "Marketing"],
           "fee_per_sem_min": 25000,
           "fee_per_sem_max": 45000,
           "min_percentage_gen": 50,
@@ -269,22 +311,30 @@
         "values": ["ALL"]
       },
       "mode": "100% Online (UGC-DEB Approved, Live + Recorded Lectures, Online Proctored Exams)",
+      "exam_pattern": "100% Online Proctored Exams from home/laptop",
       "official_website": "https://collegevidya.com",
       "installment_available": true,
-      "best_for": "12th pass & graduates looking for UGC-DEB online degrees",
+      "best_for": "12th pass, Diploma holders skipping B.Tech, and Graduates looking for UGC-DEB online degrees",
       "usp_points": [
-        "100% Legal & UGC-DEB Entitled Online Degrees for 12th pass and Graduates",
-        "NAAC A+ and A++ Top Universities (Manipal, Amity, Uttaranchal, etc.)",
+        "100% Legal & UGC-DEB Entitled Online Degrees for 12th pass, 3-yr Polytechnic Diploma holders (10+2 equivalent), and Graduates",
+        "NAAC A+ and A++ Top Universities (Manipal, Amity, Uttaranchal, D.Y. Patil)",
         "Very affordable (~₹15,000–25,000/semester for UG; ~₹25,000–45,000/semester for PG)",
-        "No daily commute — study alongside any private or government job"
+        "No daily commute — study alongside any private or government job, or while preparing for exams"
       ],
-      "compliance_notes": "Best legal alternative for 12th pass students (since 12th pass cannot do working-professional B.Tech) and for non-engineering graduates seeking MCA/MBA."
+      "compliance_notes": "Best legal pathway for 12th pass students (since 12th pass cannot do working-professional B.Tech), for 3-year Diploma holders who do NOT want to do B.Tech (3-yr Diploma = 12th equivalent), and for Graduates seeking Online MBA/MCA."
     }
   ],
+  "faq_knowledge": {
+    "online_btech_validity": "100% Online or Distance B.Tech is strictly INVALID in India under AICTE & Supreme Court norms. Working professionals can only pursue B.Tech Lateral Entry (3 years, after 3-year Polytechnic Diploma) in Regular Flexible-Shift / Weekend mode.",
+    "sanskriti_non_aicte_explanation": "Sanskriti University is NOT separately AICTE approved — it is a UGC Section 2(f) recognized State Private University established under the UP State Act 2016 (NAAC B++). Under Supreme Court precedent (Bharathidasan University v. AICTE), state-act universities have statutory authority to award degrees. If a student specifically needs Direct AICTE approval, Kalinga University (private employees) or Lingaya's Vidyapeeth (Govt/PSU in 75km NCR) is recommended.",
+    "diploma_to_bca_bba": "A 3-Year State Board / AICTE Polytechnic Diploma is officially equivalent to 10+2 (12th pass) for undergraduate admissions. Therefore, a Diploma holder who does not want to pursue B.Tech is 100% eligible for Online BCA, Online BBA, Online B.Com, or Online BA.",
+    "govt_psu_noc": "Government and PSU employees should always check their department's HR policy and obtain a No Objection Certificate (NOC) before enrolling so their degree is smoothly added to their service book for promotion.",
+    "scam_protection": "Through College Vidya, 100% of fees are paid directly on the official university portal/bank account (never to an agent's personal UPI/account) and students receive an official university fee receipt."
+  },
   "documents_checklist": {
     "BTECH_LE": [
       "10th Marksheet & Certificate",
-      "3-Year Polytechnic Diploma (All Semester Marksheets + Provisional/Degree Certificate)",
+      "3-Year Polytechnic Diploma (All Semester Marksheets + Provisional/Diploma Certificate)",
       "Aadhaar Card (Front & Back)",
       "Passport Size Photo",
       "Work Experience Certificate / Appointment Letter + Latest Salary Slip / Company ID"
@@ -297,7 +347,7 @@
       "Work Experience Certificate / Company ID"
     ],
     "ONLINE_UG_PG": [
-      "10th & 12th Marksheets (plus Graduation marksheets for MCA/MBA)",
+      "10th & 12th (or 3-Year Diploma) Marksheets (plus Graduation marksheets for MCA/MBA)",
       "Aadhaar Card",
       "Passport Size Photo"
     ]

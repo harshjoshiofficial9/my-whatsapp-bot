@@ -1,7 +1,7 @@
 /**
- * PHASE 2 & 3 — DETERMINISTIC ELIGIBILITY, INFERENCE, PROBING & STAGE ENGINE
- * The LLM NEVER decides eligibility on its own. Code computes eligibility,
- * missing fields, single next question topic, stage transitions, and lead score.
+ * PART 2.3 & PART 3 — DETERMINISTIC INTENT, ELIGIBILITY & STAGE ENGINE
+ * "Empathy & Intent First, Eligibility Engine Second"
+ * ZERO hardcoded Hinglish question templates. The LLM writes 100% of message text.
  */
 
 const NCR_75KM_CITIES = new Set([
@@ -66,53 +66,124 @@ const KNOWN_CITIES_OUTSIDE_NCR = [
 ];
 
 /**
- * Deterministically infer profile fields, intents, objections, and escalation flags
- * from incoming student text BEFORE calling the LLM.
+ * Deterministically infer profile updates, primary intent, mood, declined programs,
+ * and escalation flags from incoming student text BEFORE calling the LLM.
  */
 export function inferFromUserText(text, currentProfile = {}) {
   const raw = String(text || '').trim();
   const lower = raw.toLowerCase();
   const updates = {};
+  const declinedAdd = [];
+  const objectionsAdd = [];
+
   const meta = {
+    detected_intent: 'PROBING_ANSWER',
+    conversation_mood: currentProfile.conversation_mood || 'neutral',
     intents: [],
     objections: [],
+    declined_programs_add: [],
     needs_human: false,
     escalation_reason: null,
     requires_aicte: false,
     mentions_outside_online_btech: false,
-    asks_comparison: false
+    asks_comparison: false,
+    asks_if_ai_bot: false
   };
 
-  // 1. Opt-out check (strict word/phrase match)
+  // 1. OPT_OUT_OR_EXIT check (catches "Mujhe kuch nahi chahiye thankyou!!", "STOP", "not interested", "mat bhejo", "wrong number")
   if (
-    /^(stop|unsubscribe|quit|cancel)$/i.test(raw) ||
-    /\b(mat bhejo|msg mat karo|message mat karo|not interested|interested nahi|no more messages|dont message|don't message|block)\b/i.test(lower)
+    /^(stop|unsubscribe|quit|cancel|bye|goodbye)$/i.test(raw) ||
+    /\b(kuch\s*nahi\s*chahiye|kuch\s*nhi\s*chahiye|nahi\s*chahiye\s*thank|mat\s*bhejo|msg\s*mat\s*karo|message\s*mat\s*karo|not\s*interested|interested\s*nahi|no\s*more\s*messages|dont\s*message|don't\s*message|wrong\s*number|galat\s*number|koi\s*requirement\s*nahi)\b/i.test(lower)
   ) {
     updates.opted_out = true;
     updates.stage = 'OPTED_OUT';
+    updates.conversation_mood = 'exiting';
+    meta.detected_intent = 'OPT_OUT_OR_EXIT';
+    meta.conversation_mood = 'exiting';
     meta.intents.push('opt_out');
     return { updates, meta };
   }
 
-  // 2. Human escalation / complaint / call requests
-  if (/\b(call karo|call me|call krna|baat karao|phone karo|number do|complaint|refund|fraud|cheating|court|legal action|police|consumer forum|gussa|angry)\b/i.test(lower)) {
-    meta.needs_human = true;
-    meta.escalation_reason = 'Student requested call or raised serious complaint/concern';
+  // 2. PURE GREETING check ("Hello", "Hyy", "Hi", "Hello\nHyy", "Namaste")
+  const strippedGreeting = lower.replace(/[\s!.,?]+/g, ' ').trim();
+  if (/^(hi+|hello+|hyy+|hey+|hlo+|namaste|namaskar|good\s*morning|good\s*evening|good\s*afternoon|ram\s*ram|salaam)(\s+(hi+|hello+|hyy+|hey+|hlo+|sir|bhai|ji|harsh))*$/i.test(strippedGreeting)) {
+    meta.detected_intent = 'GREETING_ONLY';
+    meta.conversation_mood = 'neutral';
+    meta.intents.push('greeting');
+    return { updates, meta };
   }
 
-  // 3. Qualification & Stream inference
-  if (/\b(polytechnic|diploma)\b/i.test(lower)) {
+  // 3. IDENTITY_CHECK ("Ye sb ku puch rahe ho ho kaun tum?", "kaun ho tum", "tum AI bot ho kya?", "number kahan se mila")
+  if (/\b(tum\s*(ai|bot|robot)\s*ho|are\s*you\s*(an?\s*)?(ai|bot)|chatbot\s*ho|ai\s*assistant\s*ho)\b/i.test(lower)) {
+    meta.detected_intent = 'IDENTITY_CHECK';
+    meta.asks_if_ai_bot = true;
+    meta.conversation_mood = 'curious';
+    meta.intents.push('identity_check');
+  } else if (/\b(kaun\s*ho\s*tum|ho\s*kaun\s*tum|tum\s*kaun\s*ho|aap\s*kaun|who\s*are\s*you|ye\s*s[ab]+\s*ky?u+\s*puch|kyu\s*puch\s*rahe|number\s*kaha[n]?\s*se\s*mila|kisne\s*diya\s*number)\b/i.test(lower)) {
+    meta.detected_intent = 'IDENTITY_CHECK';
+    meta.conversation_mood = 'skeptical';
+    updates.conversation_mood = 'skeptical';
+    meta.intents.push('identity_check');
+  }
+
+  // 4. CONFUSION_OR_GLITCH ("Arre ky hogya?", "kya ho gaya", "repeat kyu kar rahe ho", "double message")
+  if (/\b(arre\s*ky[a]?\s*ho\s*g[ay]+a|kya\s*ho\s*gaya|ky\s*hogya|repeat\s*kyu|baar\s*baar\s*same|double\s*msg|glitch)\b/i.test(lower)) {
+    meta.detected_intent = 'CONFUSION_OR_GLITCH';
+    meta.conversation_mood = 'annoyed';
+    updates.conversation_mood = 'annoyed';
+    meta.intents.push('confusion');
+  }
+
+  // 5. COURSE_REJECTION ("Arre mujhe nahi krna btech", "btech nahi karna", "engineering nahi karni")
+  if (/\b(nahi\s*k[ar]+na\s*b\.?tech|nhi\s*k[ar]+na\s*b\.?tech|b\.?tech\s*nahi\s*k[ar]+n[ai]|b\.?tech\s*nhi\s*k[ar]+n[ai]|no\s*b\.?tech|dont\s*want\s*b\.?tech|engineering\s*nahi\s*karni|b\.?tech\s*me\s*interest\s*nahi)\b/i.test(lower)) {
+    declinedAdd.push('BTECH_LE');
+    meta.declined_programs_add.push('BTECH_LE');
+    meta.detected_intent = 'COURSE_REJECTION';
+    meta.conversation_mood = 'skeptical';
+    meta.intents.push('course_rejection');
+  }
+  if (/\b(mba\s*nahi\s*k[ar]+na|nahi\s*k[ar]+na\s*mba)\b/i.test(lower)) {
+    declinedAdd.push('ONLINE_MBA');
+    meta.declined_programs_add.push('ONLINE_MBA');
+    meta.detected_intent = 'COURSE_REJECTION';
+  }
+  if (/\b(bca\s*nahi\s*k[ar]+na|nahi\s*k[ar]+na\s*bca)\b/i.test(lower)) {
+    declinedAdd.push('ONLINE_BCA');
+    meta.declined_programs_add.push('ONLINE_BCA');
+    meta.detected_intent = 'COURSE_REJECTION';
+  }
+
+  if (declinedAdd.length > 0) {
+    const existingDeclined = Array.isArray(currentProfile.declined_programs) ? currentProfile.declined_programs : [];
+    updates.declined_programs = Array.from(new Set([...existingDeclined, ...declinedAdd]));
+  }
+
+  // 6. ANGRY_OR_FRUSTRATED / Human Escalation check
+  if (/\b(call\s*karo|call\s*me|call\s*krna|baat\s*karao|phone\s*karo|complaint|refund|fraud|cheating|court|legal\s*action|police|consumer\s*forum|gussa|angry|harass)\b/i.test(lower)) {
+    meta.needs_human = true;
+    meta.escalation_reason = 'Student requested call or raised serious complaint/concern';
+    if (/\b(complaint|refund|fraud|cheating|court|legal|police|gussa|angry)\b/i.test(lower)) {
+      meta.detected_intent = 'ANGRY_OR_FRUSTRATED';
+      meta.conversation_mood = 'annoyed';
+      updates.conversation_mood = 'annoyed';
+    }
+  }
+
+  // 7. Qualification & Stream inference
+  if (/\b(10th\s*only|sirf\s*10th|10vi\s*pass|matric\s*only)\b/i.test(lower)) {
+    updates.qualification = '10TH';
+  } else if (/\b(polytechnic|diploma)\b/i.test(lower)) {
     updates.qualification = 'DIPLOMA';
-  } else if (/\b(b\.?tech|b\.?e\.?)\s*(pass|completed|grad|graduate|kiya|किया|done|holder|hai mera|h mera)\b/i.test(lower) || /\b(after b\.?tech|m\.?tech\s*(krna|karna|karni|chahiye|admission))\b/i.test(lower)) {
+  } else if (/\b(b\.?tech|b\.?e\.?)\s*(pass|completed|grad|graduate|kiya|किया|done|holder|hai\s*mera|h\s*mera)\b/i.test(lower) || /\b(after\s*b\.?tech|m\.?tech\s*(krna|karna|karni|chahiye|admission|karun))\b/i.test(lower)) {
     updates.qualification = 'BTECH';
   } else if (/\b(b\.?sc)\s*(math|mathematics|pcm)\b/i.test(lower)) {
     updates.qualification = 'BSC_MATHS';
-  } else if (/\b(b\.?com|b\.?a\b|bba|bca|b\.?sc|graduation|graduate)\b/i.test(lower) && !/\b(karna|krna|karni|chahiye|admission)\b/i.test(lower)) {
+  } else if (/\b(b\.?com|b\.?a\b|bba|bca|b\.?sc|graduation|graduate)\b/i.test(lower) && !/\b(online\s*bca|online\s*bba|online\s*b\.?com|bca\s*karna|bba\s*karna)\b/i.test(lower)) {
     updates.qualification = 'OTHER_GRAD';
-  } else if (/\b(b\.?com)\b/i.test(lower) && /\b(kiya|pass|grad|completed|done|hai)\b/i.test(lower)) {
-    updates.qualification = 'OTHER_GRAD';
-    updates.stream_branch = 'Commerce';
-  } else if (/\b(12th|12\s*th|inter|intermediate|10\+2|hsc|barahvi|12vi)\b/i.test(lower) && !/\b(12th ke baad diploma|after 12th diploma)\b/i.test(lower)) {
+    if (/\b(b\.?com)\b/i.test(lower)) updates.stream_branch = 'Commerce';
+    else if (/\b(bca)\b/i.test(lower)) updates.stream_branch = 'Computer Applications';
+    else if (/\b(bba)\b/i.test(lower)) updates.stream_branch = 'Management';
+  } else if (/\b(12th|12\s*th|inter|intermediate|10\+2|hsc|barahvi|12vi)\b/i.test(lower) && !/\b(12th\s*ke\s*baad\s*diploma|after\s*12th\s*diploma)\b/i.test(lower)) {
     if (!currentProfile.qualification || currentProfile.qualification.startsWith('12TH')) {
       if (/\b(science|pcm|pcb|math)\b/i.test(lower)) updates.qualification = '12TH_SCIENCE';
       else if (/\b(commerce|accounts)\b/i.test(lower)) updates.qualification = '12TH_COMMERCE';
@@ -121,13 +192,8 @@ export function inferFromUserText(text, currentProfile = {}) {
     }
   }
 
-  // Direct answer to "12th ke baad Diploma kiya hai ya direct job?"
-  if (!updates.qualification && currentProfile.qualification === '12TH_SCIENCE') {
-    if (/\b(diploma)\b/i.test(lower)) updates.qualification = 'DIPLOMA';
-  }
-
   // Stream / Engineering branch inference
-  const branchMatch = lower.match(/\b(civil|mechanical|mech|electrical|electronics|ece|cse|computer science|it|information technology|mining|automobile|chemical)\b/i);
+  const branchMatch = lower.match(/\b(civil|mechanical|mech|electrical|electronics|ece|cse|computer\s*science|it|information\s*technology|mining|automobile|production|chemical|instrumentation)\b/i);
   if (branchMatch) {
     const b = branchMatch[1].toLowerCase();
     const map = {
@@ -135,37 +201,41 @@ export function inferFromUserText(text, currentProfile = {}) {
       electrical: 'Electrical', electronics: 'ECE', ece: 'ECE',
       cse: 'CSE', 'computer science': 'CSE', it: 'IT',
       'information technology': 'IT', mining: 'Mining',
-      automobile: 'Automobile', chemical: 'Chemical'
+      automobile: 'Automobile', production: 'Mechanical',
+      chemical: 'Chemical', instrumentation: 'Instrumentation'
     };
     updates.stream_branch = map[b] || branchMatch[1];
   }
 
-  // 4. Employment & Sector inference
-  if (/\b(job nahi|not working|unemployed|fresher|berozgar|abhi job nhi|no job)\b/i.test(lower)) {
+  // 8. Employment & Sector inference
+  if (/\b(job\s*nahi|not\s*working|unemployed|fresher|berozgar|abhi\s*job\s*nhi|no\s*job)\b/i.test(lower)) {
     updates.employed = false;
-  } else if (/\b(psu|ntpc|bhel|ongc|sail|gail|iocl|hpcl|bpcl|nhpc|coal india|bsnl|hal|bel|drdo)\b/i.test(lower)) {
+  } else if (/\b(psu|ntpc|bhel|ongc|sail|gail|iocl|hpcl|bpcl|nhpc|coal\s*india|bsnl|hal|bel|drdo)\b/i.test(lower)) {
     updates.employed = true;
     updates.employment_type = 'PSU';
-  } else if (/\b(govt|government|sarkari|railway|railways|pwd|cpwd|metro|dmrc|army|navy|airforce|defence|police|mes|state govt|central govt|nhai|irrigation|electricity board|uppcl)\b/i.test(lower)) {
+  } else if (/\b(govt|government|sarkari|railway|railways|pwd|cpwd|metro|dmrc|army|navy|airforce|defence|police|mes|state\s*govt|central\s*govt|nhai|irrigation|electricity\s*board|uppcl)\b/i.test(lower)) {
     updates.employed = true;
     updates.employment_type = 'GOVT';
-  } else if (/\b(private|pvt|mnc|l&t|tcs|infosys|wipro|hcl|tech mahindra|tata|maruti|hero|honda|auto parts|bosch|siemens|abb|jindal|adani|reliance|azienda|firm|factory|plant|contractor|company me|company mein)\b/i.test(lower)) {
+  } else if (/\b(private|pvt|mnc|l&t|tcs|infosys|wipro|hcl|tech\s*mahindra|tata|maruti|hero|honda|auto\s*parts|bosch|siemens|abb|jindal|adani|reliance|firm|factory|plant|production\s*job|contractor|company\s*me|company\s*mein|working\s*in\s*a\s*bank|bank)\b/i.test(lower)) {
     updates.employed = true;
     updates.employment_type = 'PRIVATE';
-  } else if (/\b(job ke sath|job ke saath|working|job karta|job krta|job kar raha|naukri)\b/i.test(lower)) {
+  } else if (/\b(job\s*ke\s*sath|job\s*ke\s*saath|working|job\s*karta|job\s*krta|job\s*kar\s*raha|job\s*kr\s*rha|naukri)\b/i.test(lower)) {
     if (currentProfile.employed === null || currentProfile.employed === undefined) {
       updates.employed = true;
     }
   }
 
   // Work experience years
-  const expMatch = lower.match(/(\d+(?:\.\d+)?)\s*(?:saal|sal|yr|yrs|year|years)\s*(?:ka\s*)?(?:exp|experience|se job|se kaam)/i);
+  const expMatch = lower.match(/(\d+(?:\.\d+)?)\s*(?:saal|sal|yr|yrs|year|years)\s*(?:ka\s*|se\s*)?(?:exp|experience|job|kaam|production)/i);
   if (expMatch) {
     updates.work_experience_years = Number(expMatch[1]);
     updates.employed = true;
+    if (!updates.employment_type && !currentProfile.employment_type && /\b(production|factory|plant|company|industry)\b/i.test(lower)) {
+      updates.employment_type = 'PRIVATE';
+    }
   }
 
-  // 5. Percentage inference
+  // 9. Percentage inference
   const pctMatch = lower.match(/\b(\d{2}(?:\.\d+)?)\s*(%|percent\b|percentage\b|marks\b|thi\b|the\b|hai\b|aaye\b|aayi\b)/i);
   if (pctMatch) {
     const val = Number(pctMatch[1]);
@@ -179,14 +249,14 @@ export function inferFromUserText(text, currentProfile = {}) {
     }
   }
 
-  // 6. Category inference
+  // 10. Category inference
   if (/\b(obc|sc|st|reserved|ews|ebc)\b/i.test(lower)) {
     updates.category = 'RESERVED';
-  } else if (/\b(general|gen|unreserved|open category)\b/i.test(lower)) {
+  } else if (/\b(general|gen|unreserved|open\s*category)\b/i.test(lower)) {
     updates.category = 'GEN';
   }
 
-  // 7. City / State & Distance from Faridabad (75 km rule)
+  // 11. City / State & Distance from Faridabad (75 km rule)
   for (const ncrCity of NCR_75KM_CITIES) {
     const regex = new RegExp(`\\b${ncrCity}\\b`, 'i');
     if (regex.test(lower)) {
@@ -209,18 +279,22 @@ export function inferFromUserText(text, currentProfile = {}) {
     }
   }
 
-  // 8. Goal / Motivation & Budget / AICTE preferences
-  if (/\b(promotion|departmental exam|je se ae|increment)\b/i.test(lower)) {
+  // 12. Goal / Motivation & Preferred Program
+  if (/\b(promotion|departmental\s*exam|je\s*se\s*ae|increment)\b/i.test(lower)) {
     updates.goal = 'promotion';
-  } else if (/\b(salary|hike|package|better job)\b/i.test(lower)) {
+  } else if (/\b(salary|hike|package|better\s*job|ctc)\b/i.test(lower)) {
     updates.goal = 'salary hike';
-  } else if (/\b(coding|software|it field|tech switch|developer)\b/i.test(lower)) {
+  } else if (/\b(coding|software|it\s*field|tech\s*switch|developer)\b/i.test(lower)) {
     updates.goal = 'tech switch';
   } else if (/\b(management|manager|business)\b/i.test(lower)) {
     updates.goal = 'management';
+  } else if (/\b(gulf|dubai|saudi|qatar|abroad)\b/i.test(lower)) {
+    updates.goal = 'gulf / abroad career';
+  } else if (/\b(govt\s*exam|upsc|ssc|psc)\b/i.test(lower)) {
+    updates.goal = 'govt exam eligibility';
   }
 
-  if (/\b(sasta|sasti|low budget|kam fee|affordable|tight budget)\b/i.test(lower)) {
+  if (/\b(sasta|sasti|low\s*budget|kam\s*fee|affordable|tight\s*budget)\b/i.test(lower)) {
     updates.budget = 'low';
   }
 
@@ -229,44 +303,65 @@ export function inferFromUserText(text, currentProfile = {}) {
     updates.preferred_mode = 'AICTE_REQUIRED';
   }
 
-  // 9. Intents & Objections
-  if (/\b(fee|fees|cost|kharcha|kitna|kitni|price|emi|installment|per sem|semester fee)\b/i.test(lower)) {
-    meta.intents.push('fee_query');
-  }
-  if (/\b(fake|valid|validity|ugc|aicte|naac|aiu|recognized|approved|scam|blacklisted|govt job me valid)\b/i.test(lower)) {
-    meta.intents.push('validity_query');
-  }
-  if (/\b(sanskriti ya kalinga|kalinga ya sanskriti|kaunsi best|kaunsa best|kaunsi better|kaunsa acha|compare|comparison|difference|dono me se)\b/i.test(lower)) {
+  // 13. Primary Intent Refinement (if not already overridden by GREETING / IDENTITY / CONFUSION / REJECTION / OPT_OUT)
+  const isSpecialIntent = new Set(['GREETING_ONLY', 'IDENTITY_CHECK', 'CONFUSION_OR_GLITCH', 'COURSE_REJECTION', 'OPT_OUT_OR_EXIT', 'ANGRY_OR_FRUSTRATED']).has(meta.detected_intent);
+
+  if (/\b(sanskriti\s*ya\s*kalinga|kalinga\s*ya\s*sanskriti|m\.?tech\s*karu[n]?\s*ya\s*mba|mba\s*ya\s*m\.?tech|kaunsi\s*best|kaunsa\s*best|kaunsi\s*better|kaunsa\s*acha|compare|comparison|difference|dono\s*me\s*se)\b/i.test(lower)) {
     meta.intents.push('comparison_query');
     meta.asks_comparison = true;
+    if (!isSpecialIntent) meta.detected_intent = 'COMPARISON_REQUEST';
   }
-  if (/\b(online b\.?tech|distance b\.?tech|mere dost|xyz|doosri jagah|agent|kisi aur college)\b/i.test(lower)) {
+
+  if (/\b(online\s*b\.?tech|distance\s*b\.?tech|mere\s*dost|25k\s*me|xyz|doosri\s*jagah|agent|kisi\s*aur\s*college)\b/i.test(lower)) {
     meta.intents.push('outside_comparison');
     meta.mentions_outside_online_btech = true;
+    if (!isSpecialIntent) meta.detected_intent = 'COMPARISON_REQUEST';
   }
-  if (/\b(document|documents|marksheet|aadhar|aadhaar|form|apply|enroll|admission kaise|process kya|checklist)\b/i.test(lower)) {
+
+  if (/\b(fake|valid|validity|ugc|aicte\s*approved\s*hai|naac|aiu|recognized|scam|blacklisted)\b/i.test(lower)) {
+    meta.intents.push('validity_query');
+    if (!isSpecialIntent && !meta.asks_comparison) meta.detected_intent = 'VALIDITY_DOUBT';
+  }
+
+  if (/\b(fee|fees|cost|kharcha|kitna|kitni|price|emi|installment|per\s*sem|semester\s*fee)\b/i.test(lower)) {
+    meta.intents.push('fee_query');
+    if (!isSpecialIntent && meta.detected_intent === 'PROBING_ANSWER') meta.detected_intent = 'DIRECT_QUESTION';
+  }
+
+  if (/\b(fayda\s*hoga|future\s*kya|scope\s*kya|career\s*growth|vlsi|semiconductor|bim|revit|gulf|ev\s*sector)\b/i.test(lower)) {
+    meta.intents.push('career_scope_query');
+    if (!isSpecialIntent) meta.detected_intent = 'DIRECT_QUESTION';
+  }
+
+  if (/\b(document|documents|marksheet|aadhar|aadhaar|form|apply|enroll|admission\s*kaise|process\s*kya|checklist)\b/i.test(lower)) {
     meta.intents.push('admission_process');
+    if (!isSpecialIntent) meta.detected_intent = 'READY_TO_PROCEED';
   }
 
   // Objections tracking
-  if (/\b(mehnga|zyada hai|budget nahi|afford|costly|expensive)\b/i.test(lower)) {
-    meta.objections.push('FEES_HIGH');
+  if (/\b(mehnga|zyada\s*hai|budget\s*nahi|afford|costly|expensive)\b/i.test(lower)) {
+    objectionsAdd.push('FEES_HIGH');
+    if (!isSpecialIntent) meta.detected_intent = 'PRICE_OBJECTION';
   }
-  if (/\b(time nahi|time nhi|shift|manage kaise|busy)\b/i.test(lower)) {
-    meta.objections.push('TIME_CONSTRAINT');
+  if (/\b(time\s*nahi|time\s*nhi|shift|manage\s*kaise|busy)\b/i.test(lower)) {
+    objectionsAdd.push('TIME_CONSTRAINT');
   }
-  if (/\b(fake|doubt|dar lagta|trust|valid hai kya)\b/i.test(lower)) {
-    meta.objections.push('VALIDITY_DOUBT');
+  if (/\b(fake|doubt|dar\s*lagta|trust|valid\s*hai\s*kya)\b/i.test(lower)) {
+    objectionsAdd.push('VALIDITY_DOUBT');
   }
-  if (/\b(ghar walo|parents|papa|family se pooch|soch ke|sochke|baad me)\b/i.test(lower)) {
-    meta.objections.push('FAMILY_CONSULT');
+  if (/\b(ghar\s*walo|parents|papa|family\s*se\s*pooch|soch\s*ke|sochke|baad\s*me)\b/i.test(lower)) {
+    objectionsAdd.push('FAMILY_CONSULT');
+    if (!isSpecialIntent) meta.detected_intent = 'HESITATION';
   }
 
+  meta.objections = objectionsAdd;
   return { updates, meta };
 }
 
 /**
- * Evaluate deterministic eligibility & recommendations against Knowledge Base.
+ * Section 3.1 — Deterministic Eligibility & Multi-Track Recommendation Engine
+ * Returns ALL valid tracks (filtering out declined_programs), rejected tracks with reasons,
+ * and semantic missing_info_optional (NO hardcoded Hinglish question strings!).
  */
 export function evaluateEligibility(lead, kb, meta = {}) {
   const qual = (lead.qualification || '').toUpperCase();
@@ -279,6 +374,7 @@ export function evaluateEligibility(lead, kb, meta = {}) {
     ? Number(lead.distance_km_from_campus)
     : (city && NCR_75KM_CITIES.has(city) ? 30 : (city ? 500 : null));
   const needsAicte = meta.requires_aicte || lead.preferred_mode === 'AICTE_REQUIRED';
+  const declined = new Set(Array.isArray(lead.declined_programs) ? lead.declined_programs : []);
 
   const eligible_programs = [];
   const recommended = [];
@@ -286,24 +382,43 @@ export function evaluateEligibility(lead, kb, meta = {}) {
   const missing_info = [];
   const already_known_fields = [];
 
-  // Populate already_known_fields so the LLM is strictly forbidden from re-asking them
-  if (qual) already_known_fields.push(`qualification (${qual}${lead.stream_branch ? ' - ' + lead.stream_branch : ''})`);
-  if (employed !== null && employed !== undefined) already_known_fields.push(`employed (${employed ? 'Yes' : 'No'})`);
-  if (empType) already_known_fields.push(`employment_type (${empType})`);
-  if (pct !== null) already_known_fields.push(`percentage (${pct}%)`);
-  if (lead.city) already_known_fields.push(`city/location (${lead.city})`);
-  if (lead.goal) already_known_fields.push(`goal/motivation (${lead.goal})`);
-  if (lead.name) already_known_fields.push(`name (${lead.name})`);
-  if (lead.work_experience_years) already_known_fields.push(`work_experience (${lead.work_experience_years} yrs)`);
+  if (qual) already_known_fields.push(`qualification=${qual}${lead.stream_branch ? '(' + lead.stream_branch + ')' : ''}`);
+  if (employed !== null && employed !== undefined) already_known_fields.push(`employed=${employed}`);
+  if (empType) already_known_fields.push(`employment_type=${empType}`);
+  if (pct !== null) already_known_fields.push(`percentage=${pct}%`);
+  if (lead.city) already_known_fields.push(`city=${lead.city}`);
+  if (lead.goal) already_known_fields.push(`goal=${lead.goal}`);
+  if (lead.name) already_known_fields.push(`name=${lead.name}`);
+  if (lead.work_experience_years) already_known_fields.push(`work_experience_years=${lead.work_experience_years}`);
+  if (declined.size > 0) already_known_fields.push(`declined_programs=[${Array.from(declined).join(',')}]`);
 
-  // Find universities in KB
+  // Check if current turn intent should suppress probing
+  const noProbeIntents = new Set([
+    'GREETING_ONLY',
+    'IDENTITY_CHECK',
+    'CONFUSION_OR_GLITCH',
+    'OPT_OUT_OR_EXIT',
+    'ANGRY_OR_FRUSTRATED'
+  ]);
+  const suppressProbing = noProbeIntents.has(meta.detected_intent);
+
   const findUniv = (id) => (kb.universities || []).find(u => u.id === id);
   const sanskriti = findUniv('sanskriti');
   const kalinga = findUniv('kalinga');
   const lingayas = findUniv('lingayas');
   const cvOnline = findUniv('cv_online_partners');
 
-  // STEP 1: Check if qualification is known
+  const onlineUgRecs = {
+    university: cvOnline?.name || 'College Vidya Online University Partners (Manipal, Amity, Uttaranchal)',
+    short_name: 'College Vidya Online Partners',
+    program: lead.goal === 'management' ? 'Online BBA' : 'Online BCA / Online BBA / Online B.Com / Online BA',
+    fee_range: '₹15,000–25,000/semester',
+    mode: '100% Online (UGC-DEB Entitled, NAAC A+/A++)',
+    approvals: 'UGC-DEB Entitled + NAAC A+/A++',
+    why: '100% legal UGC-DEB online degree with flexible online exams (~₹15k–25k/sem) alongside job or exam prep.'
+  };
+
+  // STEP 1: Qualification unknown
   if (!qual) {
     missing_info.push('qualification');
     return {
@@ -312,7 +427,24 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       recommended,
       rejected,
       missing_info,
-      next_missing_field: 'qualification (12th pass, 3-yr Polytechnic Diploma, ya Graduation?)',
+      next_missing_field: suppressProbing ? null : 'qualification',
+      already_known_fields
+    };
+  }
+
+  // CASE 0: 10TH PASS ONLY
+  if (qual === '10TH') {
+    rejected.push({
+      program: 'Direct Undergraduate Degree (B.Tech / BCA / BBA)',
+      reason: '10th pass students cannot directly enroll in a Bachelor degree. They must complete 12th (NIOS/State Board) or a 3-Year Polytechnic Diploma first.'
+    });
+    return {
+      decision_status: 'NOT_ELIGIBLE',
+      eligible_programs: ['3-Year Polytechnic Diploma or 12th (NIOS/State Board) first'],
+      recommended: [],
+      rejected,
+      missing_info: [],
+      next_missing_field: null,
       already_known_fields
     };
   }
@@ -320,29 +452,19 @@ export function evaluateEligibility(lead, kb, meta = {}) {
   // CASE A: 12TH PASS (Science / Commerce / Arts)
   if (qual.startsWith('12TH')) {
     rejected.push({
-      program: 'B.Tech for Working Professionals (Lateral Entry)',
-      reason: 'AICTE rules strictly require a 3-Year Polytechnic Diploma or B.Sc. (Maths) for Working Professional B.Tech Lateral Entry. 12th pass students cannot directly enroll in working-professional B.Tech.'
+      program: 'B.Tech for Working Professionals / Online B.Tech',
+      reason: 'Under AICTE norms, direct B.Tech after 12th in working-professional or online mode is strictly NOT allowed (Working Professional B.Tech is Lateral Entry for 3-year Diploma holders only).'
     });
 
     eligible_programs.push(
-      'Online BCA (UGC-DEB Entitled, 3 Years, ₹15,000–25,000/sem)',
-      'Online BBA (UGC-DEB Entitled, 3 Years, ₹15,000–25,000/sem)',
-      'Online B.Com (UGC-DEB Entitled, 3 Years, ₹12,000–20,000/sem)'
+      'Online BCA (3 Yrs, UGC-DEB, ~₹15,000–25,000/sem — Tech/IT/Coding track)',
+      'Online BBA (3 Yrs, UGC-DEB, ~₹15,000–25,000/sem — Management/Corporate track)',
+      'Online B.Com (3 Yrs, UGC-DEB, ~₹12,000–20,000/sem — Finance/Accounts track)',
+      'Online BA (3 Yrs, UGC-DEB, ~₹10,000–18,000/sem — Govt Exams/UPSC/SSC track)'
     );
 
-    const bestProg = lead.goal === 'management' ? 'Online BBA' : 'Online BCA';
-    recommended.push({
-      university: cvOnline?.name || 'College Vidya Online University Partners (Manipal, Amity, Uttaranchal)',
-      short_name: 'College Vidya Online Partners',
-      program: bestProg,
-      fee_range: '₹15,000–25,000/semester',
-      mode: '100% Online (UGC-DEB Approved)',
-      why: '12th ke baad job ke saath 100% legal, UGC-DEB approved degree without quitting your job.'
-    });
-
-    if (!lead.goal) {
-      missing_info.push('goal');
-    }
+    recommended.push(onlineUgRecs);
+    if (!lead.goal) missing_info.push('career_interest_track');
 
     return {
       decision_status: 'NOT_ELIGIBLE_FOR_BTECH_BUT_ALTERNATIVE_AVAILABLE',
@@ -350,7 +472,7 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       recommended,
       rejected,
       missing_info,
-      next_missing_field: !lead.goal ? 'career interest (IT/Coding side jaana hai ya Business/Management side?)' : null,
+      next_missing_field: suppressProbing ? null : (!lead.goal ? 'career_interest_track' : null),
       already_known_fields
     };
   }
@@ -358,32 +480,35 @@ export function evaluateEligibility(lead, kb, meta = {}) {
   // CASE B: OTHER GRADUATE (BA / B.Com / BCA / BBA / B.Sc non-engineering)
   if (qual === 'OTHER_GRAD') {
     rejected.push({
-      program: 'B.Tech / M.Tech for Working Professionals',
-      reason: 'Non-engineering graduates (BA/B.Com/BBA/BCA) are eligible for PG programs like Online MCA or Online MBA, not B.Tech Lateral Entry.'
+      program: 'B.Tech Lateral Entry',
+      reason: 'Non-engineering graduates (BA/B.Com/BBA/BCA) are eligible for PG degrees (Online MBA / Online MCA), not B.Tech Lateral Entry.'
     });
 
     eligible_programs.push(
-      'Online MBA (UGC-DEB Approved, 2 Years, ₹25,000–45,000/sem)',
-      'Online MCA (UGC-DEB Approved, 2 Years, ₹25,000–40,000/sem)'
+      'Online MBA (2 Yrs, UGC-DEB, NAAC A+/A++, ~₹25,000–45,000/sem)',
+      'Online MCA (2 Yrs, UGC-DEB, NAAC A+/A++, ~₹25,000–40,000/sem)'
     );
 
     const bestPg = lead.goal === 'tech switch' ? 'Online MCA' : 'Online MBA';
     recommended.push({
-      university: cvOnline?.name || 'College Vidya Online University Partners (Manipal, Amity, D.Y. Patil)',
+      university: cvOnline?.name || 'College Vidya Online University Partners (Manipal, Amity, Uttaranchal, D.Y. Patil)',
       short_name: 'College Vidya Online Partners',
       program: bestPg,
       fee_range: '₹25,000–45,000/semester',
-      mode: '100% Online (UGC-DEB Approved)',
-      why: 'Graduation ke baad job ke saath promotion aur career growth ke liye best UGC-approved PG degree.'
+      mode: '100% Online (UGC-DEB Entitled, NAAC A+/A++)',
+      approvals: 'UGC-DEB + AICTE + NAAC A+/A++',
+      why: 'Working graduates ke liye promotion, management leadership, ya IT switch ke liye top UGC-DEB approved PG degree.'
     });
+
+    if (!lead.goal) missing_info.push('goal');
 
     return {
       decision_status: 'ELIGIBLE',
       eligible_programs,
       recommended,
       rejected,
-      missing_info: !lead.goal ? ['goal'] : [],
-      next_missing_field: !lead.goal ? 'career track (Technical/IT role ke liye MCA dekhna hai ya Management/Promotion ke liye MBA?)' : null,
+      missing_info,
+      next_missing_field: suppressProbing ? null : (!lead.goal ? 'goal' : null),
       already_known_fields
     };
   }
@@ -391,29 +516,59 @@ export function evaluateEligibility(lead, kb, meta = {}) {
   // CASE C: 3-YEAR POLYTECHNIC DIPLOMA (or B.Sc Maths) OR B.TECH GRADUATE
   const isDiploma = qual === 'DIPLOMA' || qual === 'BSC_MATHS';
   const isBtech = qual === 'BTECH';
-  const targetProgCode = isBtech ? 'MTECH_WP' : 'BTECH_LE';
+
+  // CRITICAL SECTION 3.1 FIX:
+  // If Diploma holder explicitly declined B.Tech ("Arre mujhe nahi krna btech" -> declined.has('BTECH_LE')),
+  // immediately switch primary recommendation to Track 2 (Online BCA / Online BBA / Online B.Com / Online BA — 12th equivalent)!
+  if (isDiploma && declined.has('BTECH_LE')) {
+    eligible_programs.push(
+      'Online BCA (3 Yrs, UGC-DEB, ~₹15,000–25,000/sem — IT/Software/Coding switch)',
+      'Online BBA (3 Yrs, UGC-DEB, ~₹15,000–25,000/sem — Management/Operations/Sales)',
+      'Online B.Com / Online BA (3 Yrs, UGC-DEB, ~₹12,000–20,000/sem — Commerce / Govt Exams UPSC/SSC)'
+    );
+    recommended.push({
+      ...onlineUgRecs,
+      why: '3-Year Polytechnic Diploma 12th (10+2) equivalent hota hai — bina B.Tech kiye aap Online BCA (IT/Coding), Online BBA (Management), ya Online BA/B.Com (Govt exams) ke liye 100% eligible ho!'
+    });
+
+    if (!lead.goal) missing_info.push('career_interest_track');
+
+    return {
+      decision_status: 'ELIGIBLE',
+      eligible_programs,
+      recommended,
+      rejected: [{ program: 'B.Tech Lateral Entry', reason: 'Declined by student — pivoted to 12th-equivalent Online UG tracks (BCA/BBA/B.Com/BA).' }],
+      missing_info,
+      next_missing_field: suppressProbing ? null : (!lead.goal ? 'career_interest_track' : null),
+      already_known_fields
+    };
+  }
+
   const targetProgLabel = isBtech
     ? 'M.Tech for Working Professionals (2 Years)'
     : 'B.Tech Lateral Entry for Working Professionals (3 Years)';
 
-  // Check employment status
+  // Always include Track 2 alternative in eligible_programs for Diploma / B.Tech holders!
+  const alternativeTrackLabel = isBtech
+    ? 'Online MBA / Executive MBA (2 Yrs, UGC-DEB, ~₹25,000–45,000/sem — Management/Leadership track)'
+    : 'Online BCA / Online BBA / Online B.Com / Online BA (3 Yrs, UGC-DEB, ~₹15,000–25,000/sem — 12th-equivalent Non-B.Tech track)';
+
+  // If student is unemployed / fresher -> WP B.Tech/M.Tech requires job, so recommend Online UG/PG track!
   if (employed === false) {
     rejected.push({
       program: targetProgLabel,
-      reason: 'Working Professional flexible-shift B.Tech/M.Tech requires active employment experience.'
+      reason: 'Working Professional flexible-shift B.Tech/M.Tech requires active full-time employment.'
     });
-    eligible_programs.push('Online BCA / Online MCA / Regular Full-Time Campus Programs');
+    eligible_programs.push(alternativeTrackLabel);
+    recommended.push({
+      ...onlineUgRecs,
+      program: isBtech ? 'Online MBA / Online MCA' : 'Online BCA / Online BBA / Regular Full-Time B.Tech',
+      why: 'Working-professional B.Tech/M.Tech ke liye job zaroori hai, lekin UGC-DEB Online BCA/BBA/MBA bina job ke bhi 100% valid hai.'
+    });
     return {
       decision_status: 'NOT_ELIGIBLE',
       eligible_programs,
-      recommended: [{
-        university: 'College Vidya Online Partners',
-        short_name: 'CV Online Partners',
-        program: isBtech ? 'Online MBA' : 'Online BCA / Regular Full-Time B.Tech',
-        fee_range: '₹15,000–35,000/semester',
-        mode: 'Online / Regular',
-        why: 'Working professional flexible-shift B.Tech/M.Tech ke liye job experience zaroori hota hai.'
-      }],
+      recommended,
       rejected,
       missing_info: [],
       next_missing_field: null,
@@ -426,11 +581,11 @@ export function evaluateEligibility(lead, kb, meta = {}) {
     missing_info.push('employment_type');
     return {
       decision_status: 'NEED_INFO',
-      eligible_programs: [targetProgLabel],
+      eligible_programs: [targetProgLabel, alternativeTrackLabel],
       recommended: [],
       rejected: [],
       missing_info,
-      next_missing_field: 'employment_type (Abhi aapki job Private company mein hai ya Government/PSU sector mein?)',
+      next_missing_field: suppressProbing ? null : 'employment_type',
       already_known_fields
     };
   }
@@ -440,29 +595,29 @@ export function evaluateEligibility(lead, kb, meta = {}) {
     missing_info.push('percentage');
     return {
       decision_status: 'NEED_INFO',
-      eligible_programs: [targetProgLabel],
+      eligible_programs: [targetProgLabel, alternativeTrackLabel],
       recommended: [],
       rejected: [],
       missing_info,
-      next_missing_field: `percentage (${isBtech ? 'B.Tech' : 'Diploma'} mein aapki aggregate percentage kitni thi, roughly?)`,
+      next_missing_field: suppressProbing ? null : 'percentage',
       already_known_fields
     };
   }
 
   // SUBCASE C1: PRIVATE SECTOR EMPLOYEE
   if (empType === 'PRIVATE') {
-    // Notice: We NEVER ask city/location for PRIVATE sector employees because Sanskriti & Kalinga are both Pan-India!
-    // Check if percentage is between 40 and 44.9 and category wasn't explicitly specified
     const minReq = category === 'RESERVED' ? 40 : 45;
     if (pct < 40) {
       rejected.push({
         program: targetProgLabel,
         reason: `Minimum aggregate required is 45% (40% for reserved category). Student has ${pct}%.`
       });
+      eligible_programs.push(alternativeTrackLabel);
+      recommended.push(onlineUgRecs);
       return {
         decision_status: 'NOT_ELIGIBLE',
-        eligible_programs: ['Online BCA / Online BBA (where eligible)'],
-        recommended: [],
+        eligible_programs,
+        recommended,
         rejected,
         missing_info: [],
         next_missing_field: null,
@@ -474,11 +629,11 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       missing_info.push('category');
       return {
         decision_status: 'NEED_INFO',
-        eligible_programs: [targetProgLabel],
+        eligible_programs: [targetProgLabel, alternativeTrackLabel],
         recommended: [],
         rejected: [],
         missing_info,
-        next_missing_field: 'category (40–45% ke beech reserved category relaxation lagta hai — aap General category se ho ya OBC/SC/ST?)',
+        next_missing_field: suppressProbing ? null : 'category',
         already_known_fields
       };
     }
@@ -488,10 +643,12 @@ export function evaluateEligibility(lead, kb, meta = {}) {
         program: targetProgLabel,
         reason: `General category requires minimum 45% in Diploma (you have ${pct}%).`
       });
+      eligible_programs.push(alternativeTrackLabel);
+      recommended.push(onlineUgRecs);
       return {
         decision_status: 'NOT_ELIGIBLE',
-        eligible_programs: ['Online BCA / Online BBA'],
-        recommended: [],
+        eligible_programs,
+        recommended,
         rejected,
         missing_info: [],
         next_missing_field: null,
@@ -499,11 +656,8 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       };
     }
 
-    // Eligible for Private Sector B.Tech LE / M.Tech WP!
-    eligible_programs.push(targetProgLabel);
-    if (isBtech) {
-      eligible_programs.push('Online MBA / Executive MBA');
-    }
+    // Eligible for Private Sector B.Tech LE / M.Tech WP + Alternative Track!
+    eligible_programs.push(targetProgLabel, alternativeTrackLabel);
 
     const kalingaRec = {
       university: kalinga?.name || 'Kalinga University, Naya Raipur',
@@ -512,7 +666,7 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       fee_range: '₹50,000–55,000/semester',
       mode: kalinga?.mode || 'Weekend / Flexible Timing',
       approvals: 'Directly AICTE Approved + UGC 2(f) & 12(B) + NIRF 101-150 + NAAC B+',
-      why: 'Direct AICTE approval, UGC 12(B) status aur NIRF ranking chahiye toh Kalinga best choice hai (Pan-India valid).'
+      why: 'Direct AICTE approval, UGC 12(B) status aur NIRF 101-150 ranking ke liye best Pan-India choice.'
     };
 
     const sanskritiRec = {
@@ -521,57 +675,56 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       program: targetProgLabel,
       fee_range: '₹45,000–50,000/semester',
       mode: sanskriti?.mode || 'Weekend / Flexible Shift',
-      approvals: 'UGC 2(f) Recognized State Private University + NAAC B++ (2.95 CGPA) + AIU Member (Not AICTE approved; operates under UP State University Act)',
+      approvals: 'UGC 2(f) Recognized State Private University + NAAC B++ (2.95 CGPA) + AIU Member (Not AICTE approved; operates under UP State Act 2016)',
       why: 'Budget-friendly (~₹45k–50k/sem), NAAC B++ grade aur Pan-India flexible weekend batch ke liye best.'
     };
 
     if (needsAicte) {
       recommended.push(kalingaRec);
       rejected.push({
-        program: 'Sanskriti University (for AICTE-mandated requirement)',
-        reason: 'Sanskriti is a UGC 2(f) State Private University (not separately AICTE approved). Since student explicitly asked for AICTE approval, Kalinga University is the exact match.'
+        program: 'Sanskriti University (for strict AICTE requirement)',
+        reason: 'Sanskriti is a UGC 2(f) State Private University (not separately AICTE approved). For Direct AICTE approval, Kalinga University is the exact match.'
       });
-    } else if (lead.budget === 'low') {
-      recommended.push(sanskritiRec, kalingaRec);
     } else {
       recommended.push(sanskritiRec, kalingaRec);
     }
+
+    if (!lead.goal) missing_info.push('goal');
 
     return {
       decision_status: 'ELIGIBLE',
       eligible_programs,
       recommended,
       rejected,
-      missing_info: !lead.goal ? ['goal'] : [],
-      next_missing_field: !lead.goal ? 'goal (Yeh degree aap mainly promotion ke liye kar rahe ho ya job switch / salary hike ke liye?)' : null,
+      missing_info,
+      next_missing_field: suppressProbing ? null : (!lead.goal ? 'priority_budget_or_aicte' : null),
       already_known_fields
     };
   }
 
   // SUBCASE C2: GOVT / PSU EMPLOYEE
   if (empType === 'GOVT' || empType === 'PSU') {
-    // Check Lingaya's flat 50% rule first
     if (pct < 50) {
       rejected.push(
         {
           program: "Lingaya's Vidyapeeth B.Tech / M.Tech",
-          reason: `Lingaya's Vidyapeeth (the only option for Govt/PSU employees) strictly requires a flat minimum of 50% marks (no reserved category relaxation). Student has ${pct}%.`
+          reason: `Lingaya's Vidyapeeth (the only WP B.Tech option for Govt/PSU employees) strictly requires a flat minimum of 50% marks. Student has ${pct}%.`
         },
         { program: 'Sanskriti University', reason: 'Sanskriti University only accepts Private-sector employees.' },
         { program: 'Kalinga University', reason: 'Kalinga University only accepts Private-sector employees.' }
       );
 
+      eligible_programs.push(alternativeTrackLabel);
+      recommended.push({
+        ...onlineUgRecs,
+        program: isBtech ? 'Online MBA' : 'Online BCA / Online BBA / Online BA',
+        why: `Govt/PSU employees ke liye Working Professional B.Tech sirf Lingaya's mein hota hai jahan minimum 50% mandatory hai (${pct}% par WP B.Tech possible nahi hai, par UGC-DEB Online UG/PG degree le sakte hain).`
+      });
+
       return {
         decision_status: 'NOT_ELIGIBLE',
-        eligible_programs: ['Online BCA / Online BBA / Online MBA (UGC-DEB approved)'],
-        recommended: [{
-          university: 'College Vidya Online Partners',
-          short_name: 'CV Online Partners',
-          program: isBtech ? 'Online MBA' : 'Online BCA / BBA',
-          fee_range: '₹15,000–30,000/semester',
-          mode: '100% Online (UGC-DEB)',
-          why: `Govt/PSU employees ke liye B.Tech LE sirf Lingaya's mein hota hai jahan minimum 50% mandatory hai (${pct}% par B.Tech LE possible nahi hai).`
-        }],
+        eligible_programs,
+        recommended,
         rejected,
         missing_info: [],
         next_missing_field: null,
@@ -579,23 +732,25 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       };
     }
 
-    // For Govt/PSU with >= 50%, we MUST check City / Location (75 km from Faridabad rule)
+    // Govt/PSU with >= 50% requires City / Location check (75 km from Faridabad rule)
     if (!lead.city) {
       missing_info.push('city');
       return {
         decision_status: 'NEED_INFO',
-        eligible_programs: [targetProgLabel],
+        eligible_programs: [targetProgLabel, alternativeTrackLabel],
         recommended: [],
-        rejected,
+        rejected: [
+          { program: 'Sanskriti University', reason: 'Private-sector employees only.' },
+          { program: 'Kalinga University', reason: 'Private-sector employees only.' }
+        ],
         missing_info,
-        next_missing_field: "city/location (Govt/PSU employees ke liye Lingaya's Vidyapeeth Faridabad 75 km NCR radius mein allow karta hai — abhi aapki posting/residence kis city mein hai?)",
+        next_missing_field: suppressProbing ? null : 'city_for_govt_75km_check',
         already_known_fields
       };
     }
 
-    // Check if within 75 km of Faridabad
     if (distKm !== null && distKm <= 75) {
-      eligible_programs.push(targetProgLabel);
+      eligible_programs.push(targetProgLabel, alternativeTrackLabel);
       recommended.push({
         university: lingayas?.name || "Lingaya's Vidyapeeth, Faridabad (Delhi-NCR)",
         short_name: "Lingaya's Vidyapeeth",
@@ -610,22 +765,35 @@ export function evaluateEligibility(lead, kb, meta = {}) {
         decision_status: 'ELIGIBLE',
         eligible_programs,
         recommended,
-        rejected,
+        rejected: [
+          { program: 'Sanskriti University', reason: 'Private-sector employees only.' },
+          { program: 'Kalinga University', reason: 'Private-sector employees only.' }
+        ],
         missing_info: [],
         next_missing_field: null,
         already_known_fields
       };
     } else {
-      // Govt employee outside 75 km radius -> Honestly inform no WP B.Tech option right now + flag human callback
-      rejected.push({
-        program: "Lingaya's Vidyapeeth B.Tech / M.Tech",
-        reason: `Lingaya's Vidyapeeth requires residence/workplace within 75 km of Faridabad (Delhi-NCR). Student is in ${lead.city} (~${distKm} km away), and Sanskriti/Kalinga only take private-sector employees.`
+      rejected.push(
+        {
+          program: "Lingaya's Vidyapeeth B.Tech / M.Tech",
+          reason: `Lingaya's Vidyapeeth requires residence/workplace within 75 km of Faridabad (Delhi-NCR). Student is in ${lead.city} (~${distKm} km away), and Sanskriti/Kalinga only take private-sector employees.`
+        },
+        { program: 'Sanskriti University', reason: 'Private-sector employees only.' },
+        { program: 'Kalinga University', reason: 'Private-sector employees only.' }
+      );
+
+      eligible_programs.push(alternativeTrackLabel);
+      recommended.push({
+        ...onlineUgRecs,
+        program: isBtech ? 'Online MBA (UGC-DEB)' : 'Online BCA / Online BBA / Online BA (UGC-DEB) or Senior Counselor Callback',
+        why: `Govt/PSU WP B.Tech mein Lingaya's ka 75 km Faridabad rule hai (${lead.city} se possible nahi), lekin general graduation promotion/exams ke liye UGC-DEB Online degree Pan-India valid hai.`
       });
 
       return {
         decision_status: 'NOT_ELIGIBLE_LOCATION_GOVT',
-        eligible_programs: ['Online BCA / Online BBA / Online MBA (UGC-DEB Entitled) or Senior Counselor Callback'],
-        recommended: [],
+        eligible_programs,
+        recommended,
         rejected,
         missing_info: [],
         next_missing_field: null,
@@ -646,26 +814,27 @@ export function evaluateEligibility(lead, kb, meta = {}) {
 }
 
 /**
- * Deterministic Stage Transition & Lead Score Calculator (Phase 3)
+ * Section 2.3 — Stage State Machine & Lead Score Calculator
+ * Note: "Hello" keeps stage at NEW — never jumps to QUALIFYING until student indicates interest or answers probing!
  */
 export function computeStageAndScore(lead, eligibilityResult, meta = {}) {
-  if (lead.opted_out || meta.intents?.includes('opt_out')) {
-    return { stage: 'OPTED_OUT', lead_score: 0, stage_goal: 'Politely close conversation and confirm no further messages will be sent.' };
+  if (lead.opted_out || meta.detected_intent === 'OPT_OUT_OR_EXIT' || meta.intents?.includes('opt_out')) {
+    return { stage: 'OPTED_OUT', lead_score: 0 };
   }
 
   if (lead.ai_mode === 'HUMAN') {
-    return { stage: 'HUMAN_HANDLING', lead_score: Math.max(lead.lead_score || 50, 70), stage_goal: 'Human advisor is handling this student.' };
+    return { stage: 'HUMAN_HANDLING', lead_score: Math.max(lead.lead_score || 50, 70) };
   }
 
   const currentStage = lead.stage || 'NEW';
-  // Sticky terminal/advanced stages unless explicitly changed
   if (['ENROLLED', 'PAYMENT_PENDING', 'DOCS_PENDING'].includes(currentStage)) {
     const score = currentStage === 'ENROLLED' ? 100 : currentStage === 'PAYMENT_PENDING' ? 95 : 85;
-    return {
-      stage: currentStage,
-      lead_score: score,
-      stage_goal: getStageGoal(currentStage)
-    };
+    return { stage: currentStage, lead_score: score };
+  }
+
+  // Keep stage at NEW on pure greeting, identity check, or confusion if no qualification is known yet
+  if (['GREETING_ONLY', 'IDENTITY_CHECK', 'CONFUSION_OR_GLITCH'].includes(meta.detected_intent) && !lead.qualification) {
+    return { stage: currentStage === 'NEW' ? 'NEW' : 'ENGAGED', lead_score: Math.max(lead.lead_score || 10, 15) };
   }
 
   let nextStage = currentStage;
@@ -674,18 +843,23 @@ export function computeStageAndScore(lead, eligibilityResult, meta = {}) {
   if (status === 'NOT_ELIGIBLE' || status === 'NOT_ELIGIBLE_LOCATION_GOVT' || status === 'NOT_ELIGIBLE_FOR_BTECH_BUT_ALTERNATIVE_AVAILABLE') {
     nextStage = 'NOT_ELIGIBLE';
   } else if (status === 'NEED_INFO') {
-    nextStage = (lead.turn_count || 0) <= 1 && !lead.qualification ? 'NEW' : 'QUALIFYING';
+    nextStage = lead.qualification || meta.intents?.length > 0 ? 'QUALIFYING' : 'ENGAGED';
   } else if (status === 'ELIGIBLE') {
-    if (meta.intents?.includes('admission_process')) {
+    if (meta.detected_intent === 'READY_TO_PROCEED' || meta.intents?.includes('admission_process')) {
       nextStage = 'DOCS_PENDING';
-    } else if (meta.intents?.includes('fee_query') || meta.intents?.includes('comparison_query') || meta.intents?.includes('validity_query') || currentStage === 'PITCHED' || currentStage === 'WARM' || currentStage === 'INTERESTED') {
-      nextStage = currentStage === 'NEW' || currentStage === 'QUALIFYING' || currentStage === 'DISCOVERY' ? 'PITCHED' : 'WARM';
+    } else if (
+      meta.detected_intent === 'COMPARISON_REQUEST' ||
+      meta.detected_intent === 'PRICE_OBJECTION' ||
+      meta.detected_intent === 'VALIDITY_DOUBT' ||
+      meta.intents?.includes('fee_query') ||
+      ['PITCHED', 'WARM', 'INTERESTED'].includes(currentStage)
+    ) {
+      nextStage = ['NEW', 'ENGAGED', 'QUALIFYING', 'DISCOVERY'].includes(currentStage) ? 'PITCHED' : 'WARM';
     } else {
       nextStage = 'PITCHED';
     }
   }
 
-  // Calculate Lead Score (0–100)
   let score = 15;
   if (lead.qualification) score += 15;
   if (lead.employment_type) score += 15;
@@ -700,34 +874,5 @@ export function computeStageAndScore(lead, eligibilityResult, meta = {}) {
   if (nextStage === 'PAYMENT_PENDING') score = Math.max(score, 95);
   score = Math.min(100, Math.max(0, score));
 
-  return {
-    stage: nextStage,
-    lead_score: score,
-    stage_goal: getStageGoal(nextStage, eligibilityResult)
-  };
-}
-
-export function getStageGoal(stage, eligibilityResult = null) {
-  switch (stage) {
-    case 'NEW':
-      return 'Warm, short human greeting. Acknowledge what the student wants and ask ONLY the single next missing question (qualification). No university pitching yet.';
-    case 'QUALIFYING':
-    case 'DISCOVERY':
-      return `Collect the single next missing info naturally: ${eligibilityResult?.next_missing_field || 'next qualification detail'}. Acknowledge their previous answer, add 1 line of helpful insight/teaser, and ask ONLY ONE question at the end.`;
-    case 'PITCHED':
-      return 'Eligibility is now confirmed! Recommend the 1 best-fit partner university (max 2) tied to their profile, explain why it fits in short bullets/lines, and end with one soft micro-commitment question (e.g., "Fee structure detail mein bhej doon?").';
-    case 'WARM':
-    case 'INTERESTED':
-      return 'Answer their fee, validity, or comparison question clearly using ONLY KB facts. Handle objections empathetically and ask one soft micro-commitment question toward documentschecklist or form help.';
-    case 'DOCS_PENDING':
-      return 'Share the required documents checklist clearly and ask them to send their marksheet/Aadhaar photo here to verify eligibility.';
-    case 'PAYMENT_PENDING':
-      return 'Guide them that fee payment happens 100% directly on the official university portal (scam protection) and offer step-by-step form/portal assistance.';
-    case 'NOT_ELIGIBLE':
-      return 'Be 100% honest and transparent about why they are not eligible for that program under AICTE/university rules. Immediately recommend the best legal alternative from our KB (e.g., Online BCA/BBA for 12th pass, or human callback for Govt outside 75 km) and ask one soft question.';
-    case 'OPTED_OUT':
-      return 'Politely respect their request, wish them the best, and do NOT ask any question.';
-    default:
-      return 'Assist the student genuinely like a senior counselor with one question max.';
-  }
+  return { stage: nextStage, lead_score: score };
 }

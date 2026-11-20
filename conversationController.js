@@ -1,13 +1,14 @@
 import { LeadDB } from './database.js';
 import { inferFromUserText, evaluateEligibility, computeStageAndScore } from './eligibilityEngine.js';
 import { generateCounselorTurn } from './llmBrain.js';
-import { sendRedAlert, HOUR } from './followupEngine.js';
+import { sendRedAlert } from './followupEngine.js';
 
-// Per-user debounce buffers & concurrency locks
-const userDebounceBuffers = new Map(); // Map<phone, { texts: [], keys: [], timer: Timeout, resolvers: [] }>
-const userLocks = new Map();           // Map<phone, Promise>
+// Per-user debounce buffers, turn sequence counters (for stale-reply cancellation), and active generation locks
+const userDebounceMap = new Map(); // Map<phone, { texts: string[], keys: any[], timer: Timeout, resolvers: Function[] }>
+const userTurnSeq = new Map();     // Map<phone, number>
+const userActiveLock = new Map();  // Map<phone, Promise>
 
-// Rate-limiter state (~20 msgs/min global)
+// Global send rate-limiter (~20 msgs/min)
 const recentSendTimestamps = [];
 const MAX_SENDS_PER_MINUTE = 20;
 
@@ -33,7 +34,8 @@ export async function sendSingleBubbleWithRetry({
   getSock,
   isFollowUp = false,
   role = 'bot',
-  skipDelays = false
+  skipDelays = false,
+  debugMeta = {}
 }) {
   const norm = LeadDB.normalizePhoneJid(jid);
   await waitForGlobalRateLimit(skipDelays);
@@ -51,7 +53,11 @@ export async function sendSingleBubbleWithRetry({
         LeadDB.addMessage(norm, role, text, {
           waMsgId,
           status: 'SENT',
-          isFollowUp
+          isFollowUp,
+          thought: debugMeta.thought || null,
+          reasoning: debugMeta.reasoning || null,
+          detectedIntent: debugMeta.detectedIntent || null,
+          ragDocs: debugMeta.ragDocs || null
         });
         return { success: true, waMsgId, status: 'SENT' };
       } catch (err) {
@@ -66,13 +72,16 @@ export async function sendSingleBubbleWithRetry({
     }
   }
 
-  // All 3 attempts failed or socket is offline -> queue in DB for reconnect flush & record status
   const errMsg = lastErr?.message || 'Socket disconnected';
   LeadDB.enqueueOutbound(norm, text, isFollowUp, errMsg);
   LeadDB.addMessage(norm, role, text, {
     waMsgId: null,
     status: 'FAILED',
-    isFollowUp
+    isFollowUp,
+    thought: debugMeta.thought || null,
+    reasoning: debugMeta.reasoning || null,
+    detectedIntent: debugMeta.detectedIntent || null,
+    ragDocs: debugMeta.ragDocs || null
   });
   return { success: false, status: 'QUEUED', error: errMsg };
 }
@@ -95,7 +104,6 @@ export async function flushOutboundQueue({ getSock, skipDelays = false }) {
       const waMsgId = sent?.key?.id || `flushed_${Date.now()}`;
       LeadDB.markBotSentId(waMsgId);
       LeadDB.markOutboundSent(item.id);
-      // Update any FAILED message record matching this text or insert fresh SENT record
       LeadDB.addMessage(item.lead_phone, 'bot', item.text, {
         waMsgId,
         status: 'SENT',
@@ -113,8 +121,7 @@ export async function flushOutboundQueue({ getSock, skipDelays = false }) {
 }
 
 /**
- * Multi-bubble human rhythm sender (Phase 1.2)
- * Blue tick -> reading pause (1-2.5s) -> composing proportional to length -> paused -> send bubble
+ * Multi-bubble human rhythm sender
  */
 export async function sendMultiBubbleHumanTurn({
   jid,
@@ -122,19 +129,18 @@ export async function sendMultiBubbleHumanTurn({
   incomingKeys = [],
   getSock,
   isFollowUp = false,
-  skipDelays = false
+  skipDelays = false,
+  debugMeta = {}
 }) {
   const norm = LeadDB.normalizePhoneJid(jid);
   const sock = getSock ? getSock() : null;
 
-  // 1. Mark incoming messages as read (blue ticks)
   if (sock && incomingKeys.length > 0) {
     try {
       await sock.readMessages(incomingKeys);
-    } catch { /* ignore presence errors */ }
+    } catch { /* ignore presence error */ }
   }
 
-  // 2. Short reading pause (1–2.2s)
   if (!skipDelays && sock) {
     await new Promise(r => setTimeout(r, 1000 + Math.floor(Math.random() * 1200)));
   }
@@ -149,11 +155,10 @@ export async function sendMultiBubbleHumanTurn({
       try {
         await currentSock.presenceSubscribe(norm);
         await currentSock.sendPresenceUpdate('composing', norm);
-        // Wait proportional to length: ~1.1s base + 25ms/char, capped at 5.5s + jitter
         const typingMs = Math.min(5500, 1100 + (bubbleText.length * 25)) + Math.floor(Math.random() * 400);
         await new Promise(r => setTimeout(r, typingMs));
         await currentSock.sendPresenceUpdate('paused', norm);
-      } catch { /* ignore presence errors */ }
+      } catch { /* ignore */ }
     }
 
     const sendRes = await sendSingleBubbleWithRetry({
@@ -162,7 +167,8 @@ export async function sendMultiBubbleHumanTurn({
       getSock,
       isFollowUp,
       role: 'bot',
-      skipDelays
+      skipDelays,
+      debugMeta: i === 0 ? debugMeta : {}
     });
     results.push(sendRes);
   }
@@ -171,18 +177,18 @@ export async function sendMultiBubbleHumanTurn({
 }
 
 /**
- * Merge validated profile updates from LLM into lead profile without overwriting known valid data with nulls
+ * Sanitize and merge profile_updates from LLM into LeadProfile
  */
 function sanitizeAndMergeProfileUpdates(lead, inferredUpdates, llmUpdates = {}) {
   const merged = { ...inferredUpdates };
-  const allowedQuals = new Set(['12TH_SCIENCE', '12TH_COMMERCE', '12TH_ARTS', '12TH', 'DIPLOMA', 'BTECH', 'OTHER_GRAD', 'BSC_MATHS', 'PG']);
+  const allowedQuals = new Set(['10TH', '12TH_SCIENCE', '12TH_COMMERCE', '12TH_ARTS', '12TH', 'DIPLOMA', 'BTECH', 'OTHER_GRAD', 'BSC_MATHS', 'PG']);
   const allowedEmp = new Set(['PRIVATE', 'GOVT', 'PSU']);
 
   if (llmUpdates && typeof llmUpdates === 'object') {
     if (llmUpdates.name && typeof llmUpdates.name === 'string' && llmUpdates.name !== 'null' && llmUpdates.name.length >= 2) {
       merged.name = llmUpdates.name.trim();
     }
-    if (!merged.qualification && llmUpdates.qualification) {
+    if (!merged.qualification && llmUpdates.qualification && llmUpdates.qualification !== 'null') {
       const q = String(llmUpdates.qualification).toUpperCase().trim();
       if (allowedQuals.has(q)) merged.qualification = q;
     }
@@ -193,21 +199,45 @@ function sanitizeAndMergeProfileUpdates(lead, inferredUpdates, llmUpdates = {}) 
       const p = Number(llmUpdates.percentage);
       if (!isNaN(p) && p >= 30 && p <= 100) merged.percentage = p;
     }
-    if (!merged.employment_type && llmUpdates.employment_type) {
+    if (!merged.category && llmUpdates.category && ['GEN', 'RESERVED'].includes(String(llmUpdates.category).toUpperCase())) {
+      merged.category = String(llmUpdates.category).toUpperCase();
+    }
+    if (merged.employed === undefined && typeof llmUpdates.employed === 'boolean') {
+      merged.employed = llmUpdates.employed;
+    }
+    if (!merged.employment_type && llmUpdates.employment_type && llmUpdates.employment_type !== 'null') {
       const e = String(llmUpdates.employment_type).toUpperCase().trim();
       if (allowedEmp.has(e)) {
         merged.employment_type = e;
         merged.employed = true;
       }
     }
+    if (merged.work_experience_years === undefined && llmUpdates.work_experience_years !== null && llmUpdates.work_experience_years !== undefined && llmUpdates.work_experience_years !== 'null') {
+      const exp = Number(llmUpdates.work_experience_years);
+      if (!isNaN(exp) && exp >= 0 && exp <= 50) merged.work_experience_years = exp;
+    }
     if (!merged.city && llmUpdates.city && llmUpdates.city !== 'null') {
       merged.city = String(llmUpdates.city).trim();
+    }
+    if (!merged.state && llmUpdates.state && llmUpdates.state !== 'null') {
+      merged.state = String(llmUpdates.state).trim();
     }
     if (!merged.goal && llmUpdates.goal && llmUpdates.goal !== 'null') {
       merged.goal = String(llmUpdates.goal).trim();
     }
-    if (!merged.recommended_university && llmUpdates.recommended_university && llmUpdates.recommended_university !== 'null') {
-      merged.recommended_university = String(llmUpdates.recommended_university).trim();
+    if (!merged.budget && llmUpdates.budget && llmUpdates.budget !== 'null') {
+      merged.budget = String(llmUpdates.budget).trim();
+    }
+    if (!merged.preferred_program && llmUpdates.preferred_program && llmUpdates.preferred_program !== 'null') {
+      merged.preferred_program = String(llmUpdates.preferred_program).trim();
+    }
+    if (Array.isArray(llmUpdates.declined_programs_add) && llmUpdates.declined_programs_add.length > 0) {
+      const curr = Array.isArray(merged.declined_programs) ? merged.declined_programs : (Array.isArray(lead.declined_programs) ? lead.declined_programs : []);
+      merged.declined_programs = Array.from(new Set([...curr, ...llmUpdates.declined_programs_add]));
+    }
+    if (Array.isArray(llmUpdates.objections_add) && llmUpdates.objections_add.length > 0) {
+      const curr = Array.isArray(merged.objections) ? merged.objections : (Array.isArray(lead.objections) ? lead.objections : []);
+      merged.objections = Array.from(new Set([...curr, ...llmUpdates.objections_add]));
     }
   }
 
@@ -215,7 +245,7 @@ function sanitizeAndMergeProfileUpdates(lead, inferredUpdates, llmUpdates = {}) 
 }
 
 /**
- * Core Turn Processor (runs inside per-user lock after debounce)
+ * Core Turn Processor (supports direct test invocation AND debounced invocation with stale-turn cancellation)
  */
 export async function processStudentTurn({
   phone,
@@ -224,15 +254,15 @@ export async function processStudentTurn({
   getSock,
   sendOwnerAlertFn,
   isGlobalAiPaused = false,
-  skipDelays = false
+  skipDelays = false,
+  expectedTurnSeq = null
 }) {
   const norm = LeadDB.normalizePhoneJid(phone);
   let lead = LeadDB.getOrCreate(norm);
 
-  // Cancel any pending follow-ups immediately since student replied!
+  // Cancel any pending follow-ups immediately since student replied
   LeadDB.cancelFollowUpJobs(norm);
 
-  // Check if lead is in HUMAN mode or Global AI is paused
   if (isGlobalAiPaused || lead.ai_mode === 'HUMAN') {
     return {
       skipped: true,
@@ -241,14 +271,11 @@ export async function processStudentTurn({
     };
   }
 
-  // 1. Deterministic pre-LLM inference
+  // 1. Pre-LLM deterministic inference (profile updates, intent, mood, declined_programs)
   const { updates: inferredUpdates, meta } = inferFromUserText(combinedText, lead);
 
-  // Merge new objections into existing objections list
   const existingObjs = Array.isArray(lead.objections) ? lead.objections : [];
   const updatedObjs = Array.from(new Set([...existingObjs, ...(meta.objections || [])]));
-
-  // Increment turn count
   const nextTurnCount = (lead.turn_count || 0) + 1;
 
   lead = LeadDB.upsert(norm, {
@@ -266,75 +293,117 @@ export async function processStudentTurn({
   let eligibilityResult = evaluateEligibility(lead, kb, meta);
   let stageInfo = computeStageAndScore(lead, eligibilityResult, meta);
 
-  // Auto-populate recommended university/program if eligibility engine determined a top recommendation
   const topRec = eligibilityResult.recommended?.[0];
-  if (topRec) {
-    lead = LeadDB.upsert(norm, {
+  lead = LeadDB.upsert(norm, {
+    ...(topRec ? {
       recommended_university: topRec.short_name || topRec.university,
-      recommended_program: topRec.program,
-      stage: stageInfo.stage,
-      lead_score: stageInfo.lead_score
-    });
-  } else {
-    lead = LeadDB.upsert(norm, {
-      stage: stageInfo.stage,
-      lead_score: stageInfo.lead_score
-    });
-  }
+      recommended_program: topRec.program
+    } : {}),
+    stage: stageInfo.stage,
+    lead_score: stageInfo.lead_score
+  });
 
-  // 3. Load last 20 messages from SQLite
-  const conversationHistory = LeadDB.getMessages(norm, 20);
+  // 3. Load merged conversation turns (up to last 12 turns, multi-bubble turns merged with \n\n)
+  const mergedHistoryTurns = LeadDB.getMergedConversationTurns(norm, 12);
 
-  // 4. Generate Counselor Turn (LLM + Post-processor + Guardrails)
+  // 4. Generate Counselor Turn on Locked Groq 120B Engine
   let turnResult;
   try {
     turnResult = await generateCounselorTurn({
       userText: combinedText,
       lead,
-      conversationHistory,
+      mergedHistoryTurns,
       eligibilityResult,
       stageInfo,
       kb,
-      meta
-    });
-
-    // Merge any additional fields extracted by LLM
-    const finalUpdates = sanitizeAndMergeProfileUpdates(lead, {}, turnResult.profile_updates);
-    const hasCta = turnResult.messages.some(m => /\b(registration|apply|form fill|enroll)\b/i.test(m));
-
-    lead = LeadDB.upsert(norm, {
-      ...finalUpdates,
-      stage: stageInfo.stage,
-      lead_score: stageInfo.lead_score,
-      consecutive_failures: 0,
-      ...(hasCta ? { last_cta_turn: nextTurnCount } : {})
+      meta,
+      sendOwnerAlertFn
     });
   } catch (err) {
-    console.error(`❌ processStudentTurn error for ${norm}:`, err.message);
+    console.error(`❌ processStudentTurn LLM error for ${norm}:`, err.message);
     const failCount = (lead.consecutive_failures || 0) + 1;
     lead = LeadDB.upsert(norm, { consecutive_failures: failCount });
     turnResult = {
-      messages: ['Ek minute, main check karke batata hoon 🙏'],
+      thought: `LLM error fallback: ${err.message}`,
+      reasoning: '',
+      detected_intent: meta.detected_intent,
+      conversation_mood: meta.conversation_mood,
+      messages: ['Ek minute ji, main check karke aapko batata hoon 🙏'],
       profile_updates: {},
-      stage: lead.stage,
-      intent: 'error_fallback',
-      needs_human: failCount >= 2
+      stage_suggestion: lead.stage,
+      should_cancel_followups: false,
+      needs_human: failCount >= 2,
+      human_reason: err.message,
+      rag_docs: [],
+      usage: null
     };
   }
 
-  // 5. Send multi-bubble reply
+  // 5. STALE-REPLY CANCELLATION CHECK (Section 2.2):
+  // If a newer message arrived from this student while the LLM was generating, discard this stale reply!
+  if (expectedTurnSeq !== null && userTurnSeq.get(norm) !== expectedTurnSeq) {
+    console.log(`⏭️ Discarding stale in-flight LLM reply for ${norm} (seq ${expectedTurnSeq} < current ${userTurnSeq.get(norm)})`);
+    return {
+      skipped: true,
+      staleCancelled: true,
+      reason: 'STALE_TURN_SUPERSEDED',
+      lead: LeadDB.get(norm)
+    };
+  }
+
+  // 6. Merge any LLM-extracted profile_updates & re-evaluate stage if profile gained new facts
+  const postLlmUpdates = sanitizeAndMergeProfileUpdates(lead, {}, turnResult.profile_updates);
+  const isOptOut = turnResult.detected_intent === 'OPT_OUT_OR_EXIT' || turnResult.should_cancel_followups || lead.opted_out;
+
+  if (isOptOut) {
+    postLlmUpdates.opted_out = true;
+    postLlmUpdates.stage = 'OPTED_OUT';
+    LeadDB.cancelFollowUpJobs(norm);
+  }
+
+  lead = LeadDB.upsert(norm, {
+    ...postLlmUpdates,
+    conversation_mood: turnResult.conversation_mood || lead.conversation_mood || 'neutral',
+    last_thought: turnResult.thought || null,
+    last_reasoning: turnResult.reasoning || null,
+    last_intent: turnResult.detected_intent || meta.detected_intent,
+    last_rag_docs: turnResult.rag_docs || [],
+    consecutive_failures: 0
+  });
+
+  // Re-evaluate eligibility & stage after merging LLM profile updates
+  eligibilityResult = evaluateEligibility(lead, kb, meta);
+  stageInfo = computeStageAndScore(lead, eligibilityResult, meta);
+  const finalStage = isOptOut ? 'OPTED_OUT' : stageInfo.stage;
+
+  lead = LeadDB.upsert(norm, {
+    stage: finalStage,
+    lead_score: isOptOut ? 0 : stageInfo.lead_score,
+    ...(eligibilityResult.recommended?.[0] ? {
+      recommended_university: eligibilityResult.recommended[0].short_name || eligibilityResult.recommended[0].university,
+      recommended_program: eligibilityResult.recommended[0].program
+    } : {})
+  });
+
+  // 7. Send multi-bubble reply
   const sendResults = await sendMultiBubbleHumanTurn({
     jid: norm,
     bubbles: turnResult.messages,
     incomingKeys,
     getSock,
     isFollowUp: false,
-    skipDelays
+    skipDelays,
+    debugMeta: {
+      thought: turnResult.thought,
+      reasoning: turnResult.reasoning,
+      detectedIntent: turnResult.detected_intent,
+      ragDocs: turnResult.rag_docs
+    }
   });
 
-  // 6. Check if Red Alert Escalation is needed
+  // 8. Check if Red Alert Escalation is needed
   if (turnResult.needs_human || meta.needs_human || (lead.consecutive_failures || 0) >= 2) {
-    const reason = meta.escalation_reason || (lead.consecutive_failures >= 2 ? 'Bot failed 2 times in a row' : 'Counselor Escalation / Outside KB Query');
+    const reason = turnResult.human_reason || meta.escalation_reason || 'Counselor Escalation / Human Requested';
     await sendRedAlert(norm, reason, sendOwnerAlertFn);
   }
 
@@ -342,18 +411,24 @@ export async function processStudentTurn({
     skipped: false,
     lead: LeadDB.get(norm),
     eligibilityResult,
-    stageInfo,
+    stageInfo: { stage: finalStage, lead_score: lead.lead_score },
     turnResult,
     sendResults
   };
 }
 
 /**
- * Enqueue an incoming user message with per-user debouncing (8.5s default) and concurrency lock (Phase 1.3)
+ * Section 2.2 — Unified Ingestion Pipeline (`handleIncomingMessage`)
+ * Shared by BOTH Baileys (`messages.upsert`) and Dashboard Test Chat Simulator!
+ * - Saves incoming message to DB immediately (with deduplication by waMsgId)
+ * - Checks HUMAN mode
+ * - Buffers rapid messages per user (7s on Baileys, 2.5s on Simulator, or custom debounceMs)
+ * - Increments turnSeq to cancel any stale in-flight generation if a new message arrives mid-generation
  */
-export function enqueueIncomingUserMessage({
+export function handleIncomingMessage({
   phone,
   text,
+  source = 'baileys', // 'baileys' | 'simulator'
   msgKey = null,
   rawProto = null,
   mediaType = null,
@@ -361,25 +436,54 @@ export function enqueueIncomingUserMessage({
   getSock,
   sendOwnerAlertFn,
   isGlobalAiPaused = false,
-  debounceMs = 8500,
+  debounceMs = null,
   skipDelays = false
 }) {
   const norm = LeadDB.normalizePhoneJid(phone);
+  const waMsgId = msgKey?.id || null;
 
-  // Immediately persist the incoming message to SQLite so nothing is ever lost
+  // 1. Deduplicate by wa_msg_id if provided
+  if (waMsgId) {
+    if (LeadDB.isMessageProcessed(waMsgId)) {
+      return Promise.resolve({ skipped: true, reason: 'DUPLICATE_MSG_ID' });
+    }
+    LeadDB.markMessageProcessed(waMsgId);
+  }
+
+  // 2. Save incoming message to DB immediately
   LeadDB.addMessage(norm, 'user', text, {
-    waMsgId: msgKey?.id || null,
+    waMsgId,
     status: 'RECEIVED',
     mediaType,
     mediaPath,
     rawProto
   });
 
+  // 3. Check if lead is in HUMAN mode
+  const lead = LeadDB.getOrCreate(norm);
+  LeadDB.cancelFollowUpJobs(norm);
+  if (isGlobalAiPaused || lead.ai_mode === 'HUMAN') {
+    return Promise.resolve({
+      skipped: true,
+      reason: isGlobalAiPaused ? 'GLOBAL_AI_PAUSED' : 'HUMAN_MODE',
+      lead
+    });
+  }
+
+  // 4. Increment turnSeq for this user (cancels any stale in-flight LLM generation!)
+  const nextSeq = (userTurnSeq.get(norm) || 0) + 1;
+  userTurnSeq.set(norm, nextSeq);
+
+  // 5. Determine debounce window (7s for Baileys, 2.5s for Simulator, or explicit override)
+  const waitMs = debounceMs !== null && debounceMs !== undefined
+    ? Number(debounceMs)
+    : (source === 'simulator' ? 2500 : 7000);
+
   return new Promise((resolve) => {
-    let entry = userDebounceBuffers.get(norm);
+    let entry = userDebounceMap.get(norm);
     if (!entry) {
       entry = { texts: [], keys: [], timer: null, resolvers: [] };
-      userDebounceBuffers.set(norm, entry);
+      userDebounceMap.set(norm, entry);
     }
 
     entry.texts.push(text);
@@ -391,14 +495,19 @@ export function enqueueIncomingUserMessage({
     }
 
     entry.timer = setTimeout(async () => {
-      userDebounceBuffers.delete(norm);
+      const capturedSeq = userTurnSeq.get(norm);
       const combinedText = entry.texts.join('\n');
-      const keys = entry.keys;
-      const resolvers = entry.resolvers;
+      const keys = [...entry.keys];
+      const resolvers = [...entry.resolvers];
+      userDebounceMap.delete(norm);
 
-      // Acquire per-user concurrency lock so two turns never run in parallel for the same student
-      const prevLock = userLocks.get(norm) || Promise.resolve();
-      const currentTask = prevLock.then(async () => {
+      // Chain onto per-user active lock
+      const prevLock = userActiveLock.get(norm) || Promise.resolve();
+      const task = prevLock.then(async () => {
+        // If another message arrived while waiting for the lock, skip this stale execution
+        if (userTurnSeq.get(norm) !== capturedSeq) {
+          return { skipped: true, staleCancelled: true, reason: 'STALE_BEFORE_START' };
+        }
         try {
           return await processStudentTurn({
             phone: norm,
@@ -407,17 +516,21 @@ export function enqueueIncomingUserMessage({
             getSock,
             sendOwnerAlertFn,
             isGlobalAiPaused,
-            skipDelays
+            skipDelays: skipDelays || source === 'simulator',
+            expectedTurnSeq: capturedSeq
           });
         } catch (e) {
-          console.error(`⚠️ Locked turn error for ${norm}:`, e.message);
+          console.error(`⚠️ handleIncomingMessage error for ${norm}:`, e.message);
           return { error: e.message };
         }
       });
 
-      userLocks.set(norm, currentTask);
-      const result = await currentTask;
+      userActiveLock.set(norm, task);
+      const result = await task;
       for (const r of resolvers) r(result);
-    }, debounceMs);
+    }, waitMs);
   });
 }
+
+// Keep alias for backward compatibility
+export const enqueueIncomingUserMessage = handleIncomingMessage;

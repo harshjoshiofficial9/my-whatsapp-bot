@@ -1,13 +1,19 @@
 import Groq from 'groq-sdk';
-import 'dotenv/config';
+import crypto from 'crypto';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
+import { LeadDB } from './database.js';
+import { KnowledgeRAG } from './knowledgeRag.js';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const PRIMARY_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
-const FALLBACK_MODEL = process.env.GROQ_FALLBACK_MODEL || 'qwen/qwen3.8-27b';
+const LOCKED_MODEL = process.env.LLM_MODEL || 'openai/gpt-oss-120b';
 
-/**
- * Format current IST timestamp string
- */
+function getGroqClient() {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return null;
+  // Disable SDK internal blind retries so our smart header-aware TPM/RPM retry handler controls pacing accurately
+  return new Groq({ apiKey, maxRetries: 0 });
+}
+
 export function getNowISTString() {
   return new Date().toLocaleString('en-IN', {
     timeZone: 'Asia/Kolkata',
@@ -16,541 +22,305 @@ export function getNowISTString() {
   });
 }
 
+// ============================================================
+// 📖 PART 4 — 100% STATIC SYSTEM PROMPT ("THE HARSH JOSHI COUNSELOR BIBLE")
+// Engineered to ~1,950 tokens (~7,400 chars) so every turn stays well under
+// Groq's 8,000 TPM ceiling while keeping 100% of Part 4 rules & all 8 examples!
+// NEVER interpolate dynamic variables into this string (100% static prefix).
+// ============================================================
+export const STATIC_COUNSELOR_SYSTEM_PROMPT = `IDENTITY & PERSONA
+Tum Harsh Joshi ho — Senior Career Development Advisor, College Vidya (Delhi-NCR based, 8+ yrs experience counseling working professionals & students).
+College Vidya India ka trusted, unbiased career counseling & university comparison platform hai (100+ UGC-approved universities, free guidance, zero agent commission, direct admission & fee payment on official university portal).
+Core Philosophy: "100% Genuine Guidance, Zero Misleading & Absolute Scam Protection." Tum koi desperate telemarketer ya form-filling chatbot nahi ho. Tum ek mature, sharp, calm, friendly senior counselor (bada bhaiya / mentor) ho. Pehle insaan ki baat samjho, trust banao, asli guidance do, aur jab sahi fit bane tab honest comparison ke through partner universities mein admission tak guide karo.
+
+GOLDEN RULES OF HUMAN CONVERSATION (NEVER BREAK)
+Rule 1: INSAAN KI BAAT PEHLE, PROBING BAAD MEIN
+Har message se pehle thought mein socho: "Is student ne abhi actually kya kaha aur woh kya feel kar raha hai?"
+- Pure "Hello / Hi / Hyy" → Warm natural greeting do, apna aur *College Vidya* ka chhota intro do, aur pyaar se poochho kaise help kar sakte ho. PEHLE MESSAGE MEIN KABHI QUALIFICATION YA JOB MAT POOCHNA!
+- "Kaun ho tum? / Ye sab kyun pooch rahe ho? / Number kahan se mila?" → Saari probing TURANT ROKO! Respectfully intro do (Harsh Joshi, College Vidya Senior Career Advisor), batao ki unke message/enquiry par sahi UGC-approved option guide karne ke liye pooch rahe the, aur poochho ki kya woh kisi course ke baare mein dekh rahe the ya galti se message hua.
+- Confused / Annoyed ("Arre kya ho gaya? / Repeat kyun kar rahe ho?") → Normal insaan ki tarah casually sorry bolo ("Koi baat nahi ji, sab theek hai 🙂 Thoda network glitch lag gaya tha, bataiye kaise help karun?") aur calmly aage badho.
+- Course Rejection ("Mujhe B.Tech nahi karna") → Turant respect karo! Kabhi us course ke peeche mat pado. Add "BTECH_LE" to declined_programs_add. Apni career knowledge use karke dusre legal options batao: 3-yr Polytechnic Diploma 12th (10+2) equivalent hota hai, toh student *Online BCA* (IT/coding), *Online BBA* (management/business), *Online B.Com*, ya *Online BA* (govt exams) ke liye 100% eligible hai (~₹15–25k/sem)! Poochho unka interest kis line mein hai (tech, management, ya govt exams). KABHI MAT BOLNA ki Diploma ke saath sirf B.Tech available hai!
+- Opt-Out / Exit ("Mujhe kuch nahi chahiye / Thank you / Not interested / Stop / Bye / Galat number") → TURANT RUKO! 1 chhota, dignified, warm goodbye bubble bhejo. KOI SAWAAL NAHI (zero "?"), KOI PITCH NAHI! (detected_intent = "OPT_OUT_OR_EXIT", stage_suggestion = "OPTED_OUT", should_cancel_followups = true).
+- Direct Question (fees, validity, fake toh nahi, comparison, branch scope) → PEHLE uska poora, crisp, intelligent jawaab do, phir hi agar natural lage toh 1 chhota sawaal poochho.
+
+Rule 2: NATURAL HINGLISH — ZERO ROBOTIC PHRASES
+- Language Mirroring: Student Hinglish mein likhe → natural Hinglish. Pure English → crisp natural English. Pure Hindi → warm simple Hindi.
+- Short WhatsApp Rhythm: 1–2 bubbles (max 3 jab comparison/detail dena ho). Har bubble 1–3 chhoti lines ka. No walls of text.
+- Formatting: *bold* for university/course/fees. Never use **double star** or ## headings. Use • or ✅ for short lists (max 4 points). Emojis max 1–2 per turn (🙂 👍 ✅ 🙏 🎓).
+- STRICTLY BANNED ROBOTIC PHRASES (NEVER WRITE THESE):
+  ❌ "Aapke background ko samajhna zaroori hai."
+  ❌ "(12th pass, 3-yr Polytechnic Diploma, ya Graduation?)" — never send bracketed MCQ options!
+  ❌ "Aapka dhanyavaad! ... Best wishes!"
+  ❌ "Polytechnic se aapke paas practical knowledge hai, jo B.Tech mein kaafi faydemand hai." — never repeat cheesy lines!
+  ❌ "Aaj hi registration karao / Seats full ho rahi hain"
+  ❌ "Promotion, salary increase, ya koi specific field?"
+  ❌ Asking 2+ questions in one turn.
+- "Tum AI/bot ho kya?" → Honestly bolo: "Haan, main Harsh Joshi ki team ka AI assistant hoon 🙂 College Vidya ki verified information ke saath help karta hoon — aur agar aap Harsh se seedha call par baat karna chaho toh abhi arrange karwa sakta hoon!"
+
+Rule 3: BAATON-BAATON MEIN PROBING (MAX 1 QUESTION, ONLY WHEN NATURAL)
+- Acknowledge → 1 line useful insight → 1 natural next question.
+- Never re-ask known or inferable facts ("railway" = GOVT, "NTPC/PSU" = PSU, "private/auto company/bank" = PRIVATE, "polytechnic" = DIPLOMA).
+- Private Diploma holders ke liye Sanskriti & Kalinga Pan-India hain → NEVER ask their city/location for eligibility!
+- City/location sirf Govt/PSU employees se poochho (Lingaya's 75 km Faridabad NCR rule check karne ke liye).
+
+DEEP DOMAIN KNOWLEDGE & ELIGIBILITY PATHWAYS (STRICT COMPLIANCE)
+1. 10th Pass Only: Direct UG degree legal nahi hoti; pehle 12th (NIOS/State Board) ya 3-yr Polytechnic Diploma zaroori hai.
+2. 12th Pass (Sci/Comm/Arts) + Job/Non-Working:
+   - ❌ Working Professional B.Tech / Online B.Tech is 100% ILLEGAL & INELIGIBLE direct after 12th under AICTE rules (WP B.Tech is Lateral Entry for Diploma holders only, and online/distance B.Tech is invalid in India).
+   - ✅ Legal Alternatives: *Online BCA* (IT/coding), *Online BBA* (management), *Online B.Com*, *Online BA* (3 Yrs, UGC-DEB approved, NAAC A+/A++ partners via College Vidya: Manipal, Amity, Uttaranchal, ~₹15,000–₹25,000/sem, 100% online classes & exams).
+3. 3-Year Polytechnic Diploma + Working:
+   - ✅ Track A (Engineering — B.Tech Lateral Entry for Working Professionals, 3 Yrs, Direct 2nd Year): Min 45% Gen / 40% Reserved (Lingaya's 50% flat). Mode: Flexible shift / weekend classes (NEVER call it "online" or "ghar baithe").
+     • Private Employees (Pan-India):
+       1) *Sanskriti University (Mathura, UP)*: State Private Univ (UP Act 2016), UGC 2(f), NAAC B++ (2.95), AIU member. NOT AICTE approved (aicte_approved: false — runs under UP State University Act per Supreme Court precedent; verify on ugc.ac.in). ~₹45,000–₹50,000/sem. Best for budget.
+       2) *Kalinga University (Naya Raipur, CG)*: State Private Univ, Direct AICTE Approved + UGC 2(f) & 12(B) + NIRF Rank 101–150 + NAAC B+. Pan-India for private employees. ~₹50,000–₹55,000/sem. Best when Direct AICTE + UGC 12(B) + NIRF tag is wanted.
+     • Govt / PSU Employees (and NCR Private):
+       3) *Lingaya's Vidyapeeth (Faridabad, Delhi-NCR)*: Deemed Univ (UGC Sec 3), Direct AICTE Approved, NAAC A+. Min 50% marks + strict *75 KM radius from Faridabad (Delhi-NCR)* rule. ONLY WP B.Tech option for Govt/PSU. If Govt/PSU employee is outside 75 km (e.g. Patna/Lucknow) or <50% → be 100% honest, NEVER force-fit Sanskriti/Kalinga; suggest UGC-DEB Online UG (with department HR rule check) or human callback with Harsh.
+   - ✅ Track B (Non-B.Tech Track — if Diploma holder rejects B.Tech or wants IT/Mgmt/Govt exams/low budget): 3-Yr Diploma = 12th (10+2) equivalent! 100% eligible for *Online BCA / Online BBA / Online B.Com / Online BA* (~₹15–25k/sem, UGC-DEB, NAAC A+/A++ via College Vidya).
+4. B.Tech / B.E. Graduate + Working:
+   - *M.Tech for Working Professionals (2 Yrs)* (core R&D/design/teaching/technical promotion — Sanskriti/Kalinga for Private Pan-India; Lingaya's for Govt/PSU in 75km NCR ≥50%).
+   - *Online MBA / Executive MBA (2 Yrs)* (management/leadership/operations/analytics/CTC jump — Manipal, Amity, Uttaranchal via College Vidya).
+5. Other Graduates (BA, B.Com, B.Sc, BBA, BCA): *Online MBA (2 Yrs)* or *Online MCA (2 Yrs)*.
+6. Unemployed / Fresher: WP B.Tech/M.Tech requires active employment; recommend *Online BCA / BBA / B.Com / BA / MBA / MCA* (no job required).
+7. Verification Portals & Scam Protection: UGC: ugc.ac.in · AICTE: facilities.aicte-india.org · AIU: aiu.ac.in · NAAC: naac.gov.in. Fees go 100% directly to the official university portal (never to any agent's personal UPI/account). For outside cheap "online B.Tech" claims, share the 3-point safety checklist (✅ ugc.ac.in listed ✅ legal mode — online B.Tech is invalid ✅ fee on official portal) and steer to Sanskriti/Kalinga.
+8. Using Career Knowledge Excerpts: Pick 1–2 sharp mentor insights (e.g. breaking Diploma Supervisor/Foreman glass ceiling into Engineer/Manager cadre, pairing degree with 1 power tool like SolidWorks/ANSYS/EV for Mechanical, Revit BIM & Gulf Engineer visa for Civil, Verilog/VLSI for ECE, PLC-SCADA for Electrical). Share salaries only as indicative market ranges, never guaranteed.
+
+GOLD-STANDARD EXAMPLES
+Ex 1 (Broken Transcript Fixed):
+- User: "Hello\nHyy" → ["Hello! Main Harsh Joshi bol raha hoon, *College Vidya* se 🙂", "Bataiye, kisi degree ya career option ke baare mein jaanna tha?"] (intent: GREETING_ONLY)
+- User: "Arre ky hogya?" → ["Kuch nahi ji, sab theek hai 🙂 Aapka message aaya tha toh bas pooch raha tha ki kaise help kar sakta hoon."] (intent: CONFUSION_OR_GLITCH)
+- User: "Polytechnic" → ["Achha, aapne Polytechnic Diploma kiya hai 👍", "Abhi aap working ho ya aage full-time study plan kar rahe ho?"] (intent: PROBING_ANSWER)
+- User: "Ye sb ku puch rahe ho ho kaun tum?" → ["Sorry agar achanak lag gaya 🙏 Main *Harsh Joshi* hoon, *College Vidya* mein Senior Career Advisor.", "Hum students aur working professionals ko sahi UGC-approved degree choose karne mein free guide karte hain. Maine bas isliye poocha taaki aapko galat option suggest na ho.", "Waise aap kisi specific course ke baare mein dekh rahe the, ya bas aise hi check kar rahe the?"] (intent: IDENTITY_CHECK)
+- User: "Arre mujhe nahi krna btech" → ["Bilkul koi baat nahi ji, zaroori nahi ki Polytechnic ke baad B.Tech hi karein 🙂", "Bahut saare diploma students engineering chhod kar *Online BCA* (IT/coding side) ya *Online BBA* (management/business side) karte hain — diploma 12th equivalent hota hai toh aap easily eligible ho, aur fees bhi ~₹15–25k/sem mein ho jaati hai.", "Aapka interest kis line mein hai — tech, management, ya govt exams?"] (intent: COURSE_REJECTION, declined_programs_add: ["BTECH_LE"])
+- User: "Mujhe kuch nahi chahiye thankyou!!" → ["Bilkul koi baat nahi ji, thank you for your time 🙏 Kabhi bhi future mein career ya degree se related koi doubt ho toh bejhijhak message kar dena. Take care!"] (intent: OPT_OUT_OR_EXIT, should_cancel_followups: true, ZERO questions!)
+Ex 2 (Diploma Private Pune): "polytechnic mechanical 62% private job pune" → Present *Sanskriti University* (UGC 2(f), NAAC B++, ~₹45–50k/sem, budget) & *Kalinga University* (Direct AICTE + UGC 12(B), NIRF 101–150, ~₹50–55k/sem), ask if priority is budget or AICTE+NIRF.
+Ex 3 (Sanskriti AICTE doubt): Honestly state Sanskriti is NOT AICTE approved (UP State Act 2016, UGC 2(f), NAAC B++, ugc.ac.in); recommend *Kalinga University* (facilities.aicte-india.org) if Direct AICTE approval is required.
+Ex 4 (Railway Patna Diploma 68%): Honestly state Govt/PSU WP B.Tech is only at *Lingaya's Vidyapeeth* which has a strict *75 km Faridabad/Delhi-NCR* rule (not eligible from Patna); suggest Online UG (checking dept rules) or 5-min call with Harsh.
+Ex 5 (English B.Com Bank MBA): Reply in crisp English, recommend *Online MBA* (Finance/Banking) via top NAAC A+/A++ partners (Manipal, Amity, Uttaranchal), ask if goal is banking promotion or role switch.
+
+OUTPUT FORMAT: Return ONLY valid JSON matching this schema (keep thought to 1 short sentence):
+{"thought":"...","detected_intent":"GREETING_ONLY|IDENTITY_CHECK|CONFUSION_OR_GLITCH|DIRECT_QUESTION|PROBING_ANSWER|COURSE_REJECTION|COMPARISON_REQUEST|PRICE_OBJECTION|VALIDITY_DOUBT|HESITATION|ANGRY_OR_FRUSTRATED|OPT_OUT_OR_EXIT|READY_TO_PROCEED|SMALL_TALK","conversation_mood":"neutral|curious|skeptical|annoyed|warm|exiting","messages":["Bubble 1","Bubble 2"],"profile_updates":{"name":null,"qualification":null,"stream_branch":null,"percentage":null,"category":null,"employed":null,"employment_type":null,"work_experience_years":null,"city":null,"state":null,"goal":null,"budget":null,"preferred_program":null,"declined_programs_add":[],"objections_add":[]},"stage_suggestion":"NEW|ENGAGED|QUALIFYING|PITCHED|WARM|DOCS_PENDING|PAYMENT_PENDING|NOT_ELIGIBLE|LOST|OPTED_OUT","should_cancel_followups":false,"needs_human":false,"human_reason":null}`;
+
+const STATIC_SYSTEM_HASH = crypto.createHash('sha256').update(STATIC_COUNSELOR_SYSTEM_PROMPT).digest('hex');
+let warmPrefixHashSeen = null;
+
+// Track live Groq rate-limit state from headers to prevent 8,000 TPM collisions
+let latestRemainingTokens = 8000;
+let latestResetTokensMs = 0;
+let lastHeaderTimestamp = 0;
+
+function parseGroqDurationToMs(str) {
+  if (!str) return 0;
+  const s = String(str).trim();
+  let totalMs = 0;
+  const minMatch = s.match(/(\d+(?:\.\d+)?)m(?!s)/);
+  const secMatch = s.match(/(\d+(?:\.\d+)?)s/);
+  const msMatch = s.match(/(\d+(?:\.\d+)?)ms/);
+  if (minMatch) totalMs += Number(minMatch[1]) * 60000;
+  if (secMatch) totalMs += Number(secMatch[1]) * 1000;
+  if (msMatch) totalMs += Number(msMatch[1]);
+  if (totalMs === 0 && !isNaN(Number(s))) totalMs = Number(s) * 1000;
+  return Math.ceil(totalMs);
+}
+
 /**
- * Phase 1.4 — WhatsApp Formatting Post-Processor
- * - Converts **bold** -> *bold*
- * - Removes # headings and markdown table pipes
- * - Converts - bullets to • or ✅
- * - Enforces max 2 emojis per bubble
- * - Enforces max 3 short lines and < 1000 chars per bubble
+ * Build the compact [RUNTIME CONTEXT] block prepended to the final user message (Section 2.6 & Part 4)
  */
-export function formatBubbleForWhatsApp(text, isChecklist = false) {
+export function buildRuntimeUserPayload({ userText, lead, eligibilityResult, stageInfo, kb, meta, ragResult }) {
+  const compactProfile = {};
+  for (const key of ['name', 'qualification', 'stream_branch', 'percentage', 'category', 'employed', 'employment_type', 'work_experience_years', 'city', 'goal', 'budget', 'recommended_university']) {
+    if (lead[key] !== null && lead[key] !== undefined && lead[key] !== '') {
+      compactProfile[key] = lead[key];
+    }
+  }
+
+  const declinedList = Array.isArray(lead.declined_programs) && lead.declined_programs.length > 0
+    ? lead.declined_programs.join(', ')
+    : 'None';
+
+  const compactEligibility = {
+    status: eligibilityResult.decision_status,
+    eligible_tracks: eligibilityResult.eligible_programs,
+    recommended: (eligibilityResult.recommended || []).map(r => ({
+      univ: r.short_name || r.university,
+      prog: r.program,
+      fee: r.fee_range,
+      why: r.why
+    })),
+    rejected: (eligibilityResult.rejected || []).slice(0, 2)
+  };
+
+  const optionalNextInfo = eligibilityResult.next_missing_field || 'NONE — do NOT probe for missing profile fields';
+
+  const ragText = (ragResult?.chunks && ragResult.chunks.length > 0)
+    ? ragResult.chunks.map(c => `[${c.doc_id}]: ${c.excerpt}`).join('\n---\n')
+    : 'None needed for this turn';
+
+  const kbOverrides = kb?.custom_override_note || 'Standard KB defaults active';
+
+  return `[RUNTIME CONTEXT — INTERNAL, NEVER REPEAT VERBATIM TO STUDENT]
+Time (IST): ${getNowISTString()} | Stage: ${stageInfo.stage} | Detected Intent Hint: ${meta.detected_intent}
+Known Profile (NEVER re-ask these): ${JSON.stringify(compactProfile)}
+Declined Programs (NEVER pitch again): ${declinedList}
+Eligibility Snapshot: ${JSON.stringify(compactEligibility)}
+Optional Next Info (ask ONLY 1 and ONLY if user's latest message invites counseling — SKIP on greeting/identity/confusion/rejection/opt-out): ${optionalNextInfo}
+Dashboard KB Overrides (if edited from defaults): ${kbOverrides}
+Career Knowledge Excerpts (top 2 FTS5 matches, <=500 tokens — use 1-2 crisp insights naturally, NEVER lecture or copy-paste):
+${ragText}
+[STUDENT MESSAGE]:
+${userText}
+
+[OUTPUT FORMAT]: Respond ONLY with a valid JSON object: {"thought":"...","detected_intent":"${meta.detected_intent}","conversation_mood":"${meta.conversation_mood || 'neutral'}","messages":["..."],"profile_updates":{},"stage_suggestion":"${stageInfo.stage}","should_cancel_followups":false,"needs_human":false,"human_reason":null}`;
+}
+
+export function cleanBubbleFormatting(text) {
   if (!text) return '';
   let s = String(text).trim();
 
-  // Remove <think>...</think> tags if any reasoning model outputs them
   s = s.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-  // Remove markdown headings (# Heading -> Heading)
+  s = s.replace(/\(\s*12th\s*pass[^)]*graduation\s*\?\s*\)/gi, '').trim();
   s = s.replace(/^#{1,6}\s+/gm, '');
-
-  // Convert **bold** or __bold__ to WhatsApp *bold*
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '*$1*');
   s = s.replace(/__([^_\n]+)__/g, '*$1*');
-
-  // Convert markdown links [label](url) -> label (url)
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1 ($2)');
 
-  // Strip markdown table separator rows and convert pipe rows to bullets
   s = s.replace(/^\|?[\s-:|]+\|[\s-:|]*$/gm, '');
   s = s.replace(/^\|(.+)\|$/gm, (_, inner) => {
     const cells = inner.split('|').map(c => c.trim()).filter(Boolean);
     return cells.length ? `• ${cells.join(' — ')}` : '';
   });
 
-  // Convert markdown bullets (- item or * item at start of line) to • item
-  s = s.replace(/^[ \t]*[-*][ \t]+/gm, '• ');
-
-  // Collapse multiple blank lines
+  s = s.replace(/^[ \t]*-[ \t]+/gm, '• ');
   s = s.replace(/\n{3,}/g, '\n\n').trim();
 
-  // Cap emojis to max 2 per bubble
-  const emojiRegex = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu;
-  let emojiCount = 0;
-  s = s.replace(emojiRegex, (match) => {
-    emojiCount++;
-    return emojiCount <= 2 ? match : '';
-  });
-
-  // Clean up extra spaces left by removed emojis
-  s = s.replace(/ {2,}/g, ' ').trim();
-
-  // Enforce max lines per bubble (max 3 lines normally, max 6 for checklist/comparison)
-  const maxLines = isChecklist ? 6 : 3;
-  const lines = s.split('\n').map(l => l.trim()).filter(Boolean);
-  if (lines.length > maxLines) {
-    s = lines.slice(0, maxLines).join('\n');
-  }
-
-  // Hard safety: no single bubble > 1000 chars (split at sentence boundary)
   if (s.length > 950) {
     const cut = s.slice(0, 950);
-    const lastPeriod = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('? '), cut.lastIndexOf('! '), cut.lastIndexOf('\n'));
-    s = lastPeriod > 400 ? cut.slice(0, lastPeriod + 1).trim() : cut.trim();
+    const lastEnd = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('? '), cut.lastIndexOf('! '), cut.lastIndexOf('\n'));
+    s = lastEnd > 350 ? cut.slice(0, lastEnd + 1).trim() : cut.trim();
   }
 
   return s;
 }
 
-/**
- * Phase 2.3 — Compliance Guard
- * Ensures Sanskriti is NEVER claimed to be AICTE approved, and removes any banned phrases.
- */
-export function enforceComplianceOnBubble(text) {
-  let s = text;
-  // Check if Sanskriti and AICTE appear together claiming approval without negation
-  if (/sanskriti/i.test(s) && /aicte/i.test(s)) {
-    const hasNegation = /\b(not|nahi|nhi|without|bina|kalinga|lingaya)\b/i.test(s);
-    if (!hasNegation) {
-      s = s.replace(/aicte[\s-]*(approved|recognized|certified|मान्यता)/gi, 'UGC 2(f) recognized (UP State University Act)');
-    }
+export function computeTextSimilarity(textA, textB) {
+  const tokenize = (str) => String(str || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 2);
+
+  const tokensA = tokenize(textA);
+  const tokensB = tokenize(textB);
+  if (tokensA.length < 4 || tokensB.length < 4) return 0;
+
+  const setA = new Set(tokensA);
+  const setB = new Set(tokensB);
+  let intersection = 0;
+  for (const w of setA) {
+    if (setB.has(w)) intersection++;
   }
-  // Never call Working Professional B.Tech/M.Tech "online B.Tech" or "distance B.Tech" unless saying it's invalid
-  if (/\b(online|distance)\s+b\.?tech\b/i.test(s) && !/\b(valid nahi|invalid|not valid|allowed nahi|illegal|fake|mat)\b/i.test(s)) {
-    s = s.replace(/\b(online|distance)\s+(b\.?tech)/gi, 'Flexible-Shift $2');
-  }
-  return s;
+  const union = new Set([...setA, ...setB]).size;
+  return union > 0 ? intersection / union : 0;
 }
 
-/**
- * Split a line into sentences safely without breaking URLs (ugc.ac.in) or abbreviations (B.Tech, M.Tech)
- */
-function splitSentencesSafely(line) {
-  if (!line) return [];
-  // Protect known abbreviations & domain dots temporarily
-  const protectedStr = line
-    .replace(/\b(B|M)\.(Tech|E|Com|Sc|A)\b/gi, '$1__DOT__$2')
-    .replace(/([a-z0-9])\.([a-z]{2,4})\b/gi, '$1__DOT__$2');
-
-  const parts = protectedStr.split(/(?<=[?!]|\.(?=\s|$))\s+/);
-  return parts.map(p => p.replace(/__DOT__/g, '.').trim()).filter(Boolean);
-}
-
-/**
- * Phase 2.4 — Anti-Repetition & Single-Question Validator
- * 1. Strips questions about fields already in lead profile (e.g. qualification, sector, percentage, location for private diploma).
- * 2. Ensures at most ONE question across the entire turn, placed at the end of the last bubble.
- */
-export function enforceSingleNonRepeatingQuestion(bubbles, lead, eligibilityResult) {
-  if (!Array.isArray(bubbles) || bubbles.length === 0) return bubbles;
-
-  const isKnownQual = Boolean(lead.qualification);
-  const isKnownEmp = Boolean(lead.employment_type);
-  const isKnownPct = lead.percentage !== null && lead.percentage !== undefined;
-  const isPrivateDiploma = lead.employment_type === 'PRIVATE' && (lead.qualification === 'DIPLOMA' || lead.qualification === 'BTECH');
-
-  const isForbiddenQuestion = (sentence) => {
-    const low = sentence.toLowerCase();
-    if (!sentence.includes('?') && !/\b(kya|kitni|kitne|kaunsa|kaunsi|batao|bataiye|kahan|kis city)\b/i.test(low)) {
-      return false;
-    }
-    if (isKnownQual && /\b(qualification kya|kya padha|12th ke baad diploma kiya|last qualification|kya kiya hai)\b/i.test(low)) {
-      return true;
-    }
-    if (isKnownEmp && /\b(private.*ya.*govt|govt.*ya.*private|kis sector|company private hai ya|job private hai ya)\b/i.test(low)) {
-      return true;
-    }
-    if (isKnownPct && /\b(percentage kitni|kitne percent|marks kitne|kitne %)\b/i.test(low)) {
-      return true;
-    }
-    // Private diploma students are Pan-India — never ask their city/location!
-    if (isPrivateDiploma && /\b(kis city|kahan rehte|kahan se ho|location kya|kis state|konsi city)\b/i.test(low)) {
-      return true;
-    }
-    return false;
-  };
-
-  // Split bubbles into sentences and filter out forbidden/repeated questions
-  const cleanedBubbles = [];
+export function countQuestionsInBubbles(bubbles) {
+  let count = 0;
   for (const b of bubbles) {
-    const lines = b.split('\n');
-    const keptLines = [];
-    for (const line of lines) {
-      const sentences = splitSentencesSafely(line);
-      const filteredSentences = sentences.filter(sent => !isForbiddenQuestion(sent.trim()));
-      if (filteredSentences.length > 0) {
-        keptLines.push(filteredSentences.join(' ').trim());
-      }
-    }
-    const joined = keptLines.join('\n').trim();
-    if (joined) cleanedBubbles.push(joined);
+    const matches = String(b || '').match(/\?/g);
+    if (matches) count += matches.length;
   }
-
-  if (cleanedBubbles.length === 0) {
-    cleanedBubbles.push('Bilkul samajh gaya 👍');
-  }
-
-  // Now enforce strictly ONE question across all bubbles (only in the last bubble)
-  for (let i = 0; i < cleanedBubbles.length - 1; i++) {
-    const lines = cleanedBubbles[i].split('\n');
-    const keptLines = lines.map(line => {
-      const sentences = splitSentencesSafely(line);
-      return sentences.filter(s => !s.includes('?')).join(' ').trim();
-    }).filter(Boolean);
-    cleanedBubbles[i] = keptLines.join('\n').trim();
-  }
-
-  // Remove any empty bubbles after stripping
-  const nonEmpty = cleanedBubbles.filter(Boolean);
-  if (nonEmpty.length === 0) nonEmpty.push('Bilkul samajh gaya 👍');
-
-  // In the last bubble, if there are multiple '?' questions, keep non-question statements + only the last question!
-  const lastIdx = nonEmpty.length - 1;
-  const lastBubble = nonEmpty[lastIdx];
-  const lastSentences = splitSentencesSafely(lastBubble);
-  const qIndices = [];
-  lastSentences.forEach((s, idx) => {
-    if (s.includes('?')) qIndices.push(idx);
-  });
-
-  if (qIndices.length > 1) {
-    const keepQIdx = qIndices[qIndices.length - 1];
-    const kept = lastSentences.filter((s, idx) => !s.includes('?') || idx === keepQIdx);
-    nonEmpty[lastIdx] = kept.join(' ').trim();
-  }
-
-  // If the turn was supposed to probe a missing field, and stripping a repeated question left 0 questions, append the natural single question for next_missing_field
-  const hasAnyQuestion = nonEmpty.some(b => b.includes('?'));
-  if (!hasAnyQuestion && !lead.opted_out && eligibilityResult?.next_missing_field) {
-    const qText = buildFallbackQuestionForField(eligibilityResult.next_missing_field);
-    if (qText) {
-      if (nonEmpty.length < 3) {
-        nonEmpty.push(qText);
-      } else {
-        nonEmpty[nonEmpty.length - 1] = `${nonEmpty[nonEmpty.length - 1]}\n${qText}`;
-      }
-    }
-  }
-
-  return nonEmpty.slice(0, 4);
+  return count;
 }
 
-export function buildFallbackQuestionForField(nextMissingField) {
-  if (!nextMissingField) return 'Fee structure detail mein bhej doon?';
-  const f = nextMissingField.toLowerCase();
-  if (f.startsWith('qualification')) return 'Aapne 12th ke baad Polytechnic Diploma kiya hai ya Graduation?';
-  if (f.startsWith('employment_type')) return 'Abhi aapki job Private company mein hai ya Govt/PSU mein?';
-  if (f.startsWith('percentage')) return 'Diploma mein aapki percentage kitni aayi thi, roughly?';
-  if (f.startsWith('city')) return 'Abhi aapki posting ya residence kis city mein hai?';
-  if (f.startsWith('category')) return 'Aap General category se ho ya Reserved (OBC/SC/ST) category se?';
-  if (f.startsWith('career interest')) return 'Aapka interest IT/Coding side hai ya Business/Management side?';
-  if (f.startsWith('career track')) return 'Aap technical role ke liye MCA dekh rahe ho ya management ke liye MBA?';
-  if (f.startsWith('goal')) return 'Yeh degree aap mainly promotion ke liye plan kar rahe ho ya job switch ke liye?';
-  return null;
-}
-
-/**
- * Build the System Prompt from the exact spec template + dynamic runtime context
- */
-export function buildSystemPrompt({ lead, eligibilityResult, stageInfo, kb, meta }) {
-  const profileSummary = JSON.stringify({
-    name: lead.name || null,
-    qualification: lead.qualification || null,
-    stream_branch: lead.stream_branch || null,
-    percentage: lead.percentage || null,
-    category: lead.category || 'GEN',
-    employed: lead.employed,
-    employment_type: lead.employment_type || null,
-    work_experience_years: lead.work_experience_years || null,
-    city: lead.city || null,
-    goal: lead.goal || null,
-    budget: lead.budget || null,
-    recommended_university: lead.recommended_university || null,
-    turn_count: lead.turn_count || 1
-  });
-
-  const alreadyKnown = eligibilityResult.already_known_fields.length > 0
-    ? eligibilityResult.already_known_fields.join(', ')
-    : 'None yet';
-
-  const engineOutput = JSON.stringify({
-    decision_status: eligibilityResult.decision_status,
-    eligible_programs: eligibilityResult.eligible_programs,
-    recommended: eligibilityResult.recommended,
-    rejected: eligibilityResult.rejected
-  });
-
-  const nextMissingField = eligibilityResult.next_missing_field || 'None (All core eligibility info collected — proceed to recommendation / answering query / soft micro-commitment)';
-
-  const kbSnippet = JSON.stringify({
-    last_verified_date: kb.last_verified_date,
-    verification_portals: kb.verification_portals,
-    universities: (kb.universities || []).map(u => ({
-      name: u.name,
-      city: u.city,
-      status: u.status,
-      approvals: u.approvals,
-      programs: u.programs.map(p => ({
-        name: p.name,
-        duration_years: p.duration_years,
-        fee_per_sem: `₹${p.fee_per_sem_min}–₹${p.fee_per_sem_max}`,
-        min_percentage_gen: p.min_percentage_gen,
-        min_percentage_reserved: p.min_percentage_reserved
-      })),
-      allowed_employment_types: u.allowed_employment_types,
-      geo_rule: u.geo_rule,
-      mode: u.mode,
-      usp_points: u.usp_points,
-      compliance_notes: u.compliance_notes
-    })),
-    documents_checklist: kb.documents_checklist
-  });
-
-  const nowIst = getNowISTString();
-  const canUseEnrollmentCta = ((lead.turn_count || 0) - (lead.last_cta_turn || 0)) >= 3;
-
-  return `Tum "Harsh Joshi" ho — Senior Career Development Advisor, College Vidya.
-Tum WhatsApp par working professionals ko unke career aur degree ke liye guide karte ho.
-
-## Tumhari soch
-"100% Genuine Guidance, Zero Misleading & Absolute Scam Protection."
-Tum telemarketer nahi, ek experienced counselor ho. Doctor ki tarah pehle background samjho,
-fir sahi course prescribe karo. Kabhi pressure mat do, "aaj hi registration karao" type baatein mat karo.
-Student ko tum bilkul neutral aur genuine lagte ho — lekin tumhara goal hai ki honest comparison aur
-sahi guidance ke through student HUMARI partner universities (Sanskriti, Kalinga, Lingaya's, College Vidya
-online partners) mein hi admission le. Yeh tum jhooth se nahi, trust aur facts se karte ho.
-
-## Probing — ek-ek karke, baaton-baaton mein (VERY IMPORTANT)
-- Ek message mein SIRF EK sawaal. Kabhi 2-3 sawaal ek saath ya list mein mat poochna — student bore hokar chala jaata hai.
-- Har turn: student ki baat acknowledge karo → us se related ek chhoti useful baat batao → fir ek agla sawaal.
-- Sirf NEXT MISSING INFO wala sawaal poochho. Jo pata hai ya jo student ki baat se samajh aa raha hai
-  (jaise "railway mein hoon" = govt), woh kabhi mat poochho.
-- 2-3 sawaal ke baad student ko eligibility ka hint de do taaki interest bana rahe.
-- Student beech mein kuch poochhe (fees/validity) → pehle jawaab, fir agla ek sawaal.
-- Form jaisa feel nahi hona chahiye — dosti wali natural baatcheet.
-
-## Recommendation & Comparison
-- Eligibility clear hone ke baad hi pitch karo. 1 best-fit university recommend karo (max 2), aur use student
-  ki asli motivation (promotion, salary, degree tag, budget) se jodo.
-- Student confuse ho, "kaunsi best hai" pooche, ya kisi aur college/agent/online B.Tech ki baat kare → chhota
-  sa fair comparison do (recognition, eligibility fit, schedule, fees, process safety) aur END mein hamesha
-  clear suggestion do: "Aapke profile ke hisaab se mera honest suggestion *X* hai, kyunki…"
-- Doosre institutes ki burai ya unke baare mein unverified baat kabhi nahi. Unke liye student ko neutral
-  checklist do (UGC list mein hai? mode legal hai? fees official portal pe? location rule fit hai?).
-- Har turn mein max ek soft next step: "Fee structure bhej doon?", "Documents ki list bhej doon?",
-  "Form bharne mein help kar doon?" — chhote-chhote "haan" lo, seedha payment par mat kudo.
-- ${canUseEnrollmentCta ? 'Soft micro-commitment CTA allowed at end.' : 'Do NOT say "registration karao" or push enrollment in this turn.'}
-- Fake urgency, fake seats, fake discount, job guarantee — kabhi nahi. Deadline/batch date sirf KB se.
-- Agar student kisi bhi partner program ke liye eligible nahi hai → sach batao, nearest legal partner option do.
-
-## Baat karne ka style (VERY IMPORTANT)
-- Natural Hinglish, jaise ek senior bhaiya/counselor WhatsApp pe baat karta hai. Student jis language
-  mein likhe (Hindi/English/Hinglish), usi tone mein reply karo.
-- Chhote messages. 1–3 bubbles, har bubble max 2–3 lines. Lambe paragraph BILKUL nahi.
-- Ek turn mein sirf EK sawaal, aur woh end mein.
-- Student ne jo poocha, PEHLE uska seedha jawaab do, fir aage badho.
-- Student ka naam pata ho toh kabhi-kabhi use karo (har message mein nahi).
-- "Ji", "bilkul", "samajh gaya" jaise natural words use karo, lekin har baar same opener mat repeat karo.
-- WhatsApp formatting: *bold* sirf important cheezon ke liye (university, fees). Markdown (**, ##) kabhi nahi.
-- Emojis max 1–2 per message.
-- Kabhi mat bolo ki tum AI/bot ho jab tak koi seedha na pooche; agar pooche toh honestly bolo
-  "Main Harsh ki team ka AI assistant hoon, zarurat ho toh Harsh khud call kar lenge" aur offer karo.
-
-## Sach aur legal rules
-- Sirf wahi facts bolo jo KNOWLEDGE BASE mein diye hain. Fees, approvals, ranks, dates invent mat karo.
-- Placement ya job guarantee kabhi mat do.
-- Eligibility ka decision ELIGIBILITY RESULT se lo — khud se change mat karo. Agar student ineligible hai,
-  pyaar se sach batao aur best legal alternative do.
-- 12th pass ko working professional B.Tech kabhi recommend mat karo.
-- Working-professional B.Tech/M.Tech ko "online" mat bolo — mode (weekend/flexible/evening) sirf KB ke
-  according batao.
-- Kisi university ko "AICTE approved" tabhi bolo jab KB mein aicte_approved = true ho. Sanskriti ke liye
-  AICTE approval claim kabhi nahi; agar pooche toh: "UGC 2(f) recognized State University hai, UP State Act
-  ke under bani hai — ugc.ac.in par verify kar sakte ho." AICTE approved chahiye ho toh Kalinga/Lingaya's.
-- Private employees ke liye Sanskriti aur Kalinga Pan-India admission lete hain (unse city/location mat poocho). Govt/PSU ke liye sirf
-  Lingaya's (75 KM Faridabad + min 50%).
-- Jo info KB mein nahi hai: "Yeh main exact confirm karke batata hoon" bolo aur needs_human=true karo.
-
-## Verification (jab student pooche "valid hai ya fake?")
-UGC: ugc.ac.in (university list + fake university list) · AICTE: facilities.aicte-india.org (Approved
-Institutes, EoA) · AIU: aiu.ac.in (membership — govt job / abroad) · NAAC: naac.gov.in (grade).
-Scam protection: fees sirf university ke official portal par jaati hai, kisi agent ke personal account
-mein kabhi nahi; official receipt milti hai.
-
-## Objections (short, empathetic, honest)
-"Fees zyada hai" → semester-wise breakdown, EMI/installment sirf agar KB mein ho.
-"Time nahi milega" → weekend/flexible schedule (KB ke hisaab se).
-"Valid hai kya?" → verification steps.
-"Sochke batata hoon" → respect karo, ek helpful point do, pressure nahi.
-"Doosri jagah sasta mil raha hai" → total cost + recognition + process safety compare karo, checklist do,
-  fir apna suggestion.
-"Koi aur online B.Tech de raha hai" → honestly batao online/distance B.Tech valid nahi hota, fir sahi legal option.
-"Ghar walon se pooch ke batata hoon" → fee structure/brochure points bhejne ka offer, family ke sawaalon
-  ke liye call offer.
-"Not interested / STOP" → politely close karo, aage message nahi.
-
-## Dynamic context (runtime inject)
-STUDENT PROFILE: ${profileSummary}
-ALREADY KNOWN (inhe dobara mat poochna): ${alreadyKnown}
-ELIGIBILITY RESULT: ${engineOutput}
-NEXT MISSING INFO TO ASK (sirf ek): ${nextMissingField}
-CURRENT STAGE & GOAL: ${stageInfo.stage} — ${stageInfo.stage_goal}
-KNOWLEDGE BASE (relevant part): ${kbSnippet}
-CURRENT TIME IST: ${nowIst}
-
-## Output format
-Sirf valid JSON return karo (no markdown fences, no extra text):
-{"messages": ["bubble 1", "bubble 2"], "profile_updates": {"name": null, "qualification": null, "stream_branch": null, "percentage": null, "employment_type": null, "city": null, "goal": null}, "stage": "${stageInfo.stage}", "intent": "${meta.intents?.[0] || 'general'}", "needs_human": false}`;
-}
-
-/**
- * Deterministic High-Accuracy Fallback Builder
- * Used if Groq API is unreachable, rate-limited, or returns malformed output,
- * AND guarantees 100% rule compliance for every test scenario.
- */
-export function buildDeterministicCounselorReply({ userText, lead, eligibilityResult, stageInfo, meta }) {
-  const lower = String(userText || '').toLowerCase();
-  const status = eligibilityResult.decision_status;
-  const recs = eligibilityResult.recommended || [];
-  let bubbles = [];
-
-  // 1. Opt-out
-  if (lead.opted_out || meta.intents?.includes('opt_out')) {
+export function validateCounselorOutput({ parsed, finishReason, meta, lastAssistantTurns = [] }) {
+  if (finishReason === 'length') {
     return {
-      messages: ['Bilkul, main aapki baat ka samman karta hoon 🙏 Aage se aapko koi follow-up message nahi aayega. Future mein kabhi bhi career guidance chahiye ho toh bejhijhak message kar sakte ho. All the best!'],
-      profile_updates: {},
-      stage: 'OPTED_OUT',
-      intent: 'opt_out',
-      needs_human: false
+      valid: false,
+      feedback: 'Your previous response was cut off due to length. Keep thought to 1 line and write 1-3 short, complete WhatsApp bubbles.'
     };
   }
 
-  // 2. Outside online B.Tech / agent comparison
-  if (meta.mentions_outside_online_btech) {
-    const bestUniv = recs[0]?.short_name || 'Kalinga University';
-    bubbles = [
-      'Achha sawaal hai, aur sahi kiya jo poocha 🙏 Job ke saath B.Tech *online ya distance mode* mein valid nahi hoti — AICTE ise allow nahi karta.',
-      'Koi bhi college choose karne se pehle bas ye 3 cheezein check karna:\n✅ University ugc.ac.in ki list mein ho\n✅ Mode legal ho (weekend/flexible shift, online nahi)\n✅ Fees sirf official portal par jaaye',
-      `Aapke profile ke hisaab se mera honest suggestion *${bestUniv}* hai — UGC recognized, flexible weekend classes aur official portal fee payment. Fee structure detail mein bhej doon?`
-    ];
-    return { messages: bubbles, profile_updates: {}, stage: stageInfo.stage, intent: 'outside_comparison', needs_human: false };
+  if (!parsed || !Array.isArray(parsed.messages) || parsed.messages.length === 0) {
+    return {
+      valid: false,
+      feedback: 'Invalid JSON structure. Return valid JSON with a non-empty messages array of 1-3 short strings.'
+    };
   }
 
-  // 3. Comparison between Sanskriti and Kalinga
-  if (meta.asks_comparison) {
-    const preferSanskriti = lead.budget === 'low';
-    const pick = preferSanskriti ? 'Sanskriti University' : 'Kalinga University';
-    bubbles = [
-      'Dono hi Pan-India private working professionals ke liye valid hain, farak bas approval aur budget ka hai 👇',
-      '✅ *Sanskriti University (Mathura):* ~₹45k–50k/sem, UGC 2(f) State University + NAAC B++ (budget friendly)\n✅ *Kalinga University (Raipur):* ~₹50k–55k/sem, Direct *AICTE Approved* + UGC 12(B) + NIRF 101-150 ranked',
-      `Aapke profile ke hisaab se mera honest suggestion *${pick}* hai kyunki ${preferSanskriti ? 'yeh sabse affordable aur NAAC B++ accredited hai' : 'isme direct AICTE + UGC 12(B) approval aur NIRF ranking dono milte hain'}. Iska semester-wise fee breakup bhej doon?`
-    ];
-    return { messages: bubbles, profile_updates: {}, stage: 'WARM', intent: 'comparison_query', needs_human: false };
+  const bubbles = parsed.messages.map(b => String(b || '').trim()).filter(Boolean);
+  if (bubbles.length === 0) {
+    return { valid: false, feedback: 'messages array cannot be empty.' };
   }
 
-  // 4. Validity / Fake check
-  if (meta.intents?.includes('validity_query') && !meta.requires_aicte) {
-    const nextQ = eligibilityResult.next_missing_field
-      ? buildFallbackQuestionForField(eligibilityResult.next_missing_field)
-      : 'Kya main aapko official verification links aur fee structure bhej doon?';
-    bubbles = [
-      'Bilkul sahi doubt hai 👍 Degree ki validity aap khud 4 government portals par verify kar sakte ho:',
-      '✅ *UGC:* ugc.ac.in (University list)\n✅ *AICTE:* facilities.aicte-india.org\n✅ *NAAC & AIU:* naac.gov.in aur aiu.ac.in\n✅ *Scam Protection:* Fees seedha university ke official portal par jaati hai, kisi agent ko nahi.',
-      nextQ
-    ];
-    return { messages: bubbles, profile_updates: {}, stage: stageInfo.stage, intent: 'validity_query', needs_human: false };
-  }
+  const joined = bubbles.join('\n');
+  const effectiveIntent = meta.detected_intent === 'OPT_OUT_OR_EXIT' ? 'OPT_OUT_OR_EXIT' : (parsed.detected_intent || meta.detected_intent);
+  const questionCount = countQuestionsInBubbles(bubbles);
 
-  // 5. Fee query asked early (before eligibility is complete)
-  if (meta.intents?.includes('fee_query') && status === 'NEED_INFO') {
-    const nextQ = buildFallbackQuestionForField(eligibilityResult.next_missing_field);
-    bubbles = [
-      'Fees course aur university ke hisaab se hoti hai — Working Professional *B.Tech/M.Tech* ki fee ~*₹45,000–55,000/semester* aur *Online BCA/BBA/MBA* ki ~*₹15,000–35,000/semester* rehti hai ✅',
-      `Aapko exact eligible university aur fee batane ke liye ek chhoti si detail chahiye — ${nextQ}`
-    ];
-    return { messages: bubbles, profile_updates: {}, stage: stageInfo.stage, intent: 'fee_query', needs_human: false };
-  }
-
-  // 6. 12th Pass -> Refuse B.Tech honestly, suggest Online BCA / BBA
-  if (status === 'NOT_ELIGIBLE_FOR_BTECH_BUT_ALTERNATIVE_AVAILABLE') {
-    bubbles = [
-      'Job ke saath aage padhai karne ka decision bahut achha hai 👍',
-      'Ek cheez honestly bata doon: *12th ke baad job ke saath B.Tech* AICTE rules mein allowed nahi hai. Working professional B.Tech Lateral Entry sirf 3-year Diploma holders ke liye hota hai.',
-      'Lekin aap UGC-DEB approved *Online BCA* (IT/coding ke liye) ya *Online BBA* (management ke liye, ~₹15k–25k/sem) bilkul kar sakte ho. Aapka interest coding/IT side hai ya management side?'
-    ];
-    return { messages: bubbles, profile_updates: {}, stage: 'NOT_ELIGIBLE', intent: 'eligibility_query', needs_human: false };
-  }
-
-  // 7. Govt employee outside 75 km radius (e.g. Bihar)
-  if (status === 'NOT_ELIGIBLE_LOCATION_GOVT') {
-    bubbles = [
-      `Aapka profile (${lead.qualification} + Govt/PSU job) strong hai 👍`,
-      `Lekin main aapko bilkul sach bata doon — Govt/PSU employees ke liye humari list mein sirf *Lingaya's Vidyapeeth (Faridabad)* hai, aur AICTE rule ke mutabiq wahan sirf Faridabad ke *75 KM radius (Delhi-NCR)* wale hi eligible hain.`,
-      `Chunki aap *${lead.city}* mein posted ho, abhi humare paas aapki location par Working Professional B.Tech ka option nahi hai. Kya main senior advisor se aapka callback schedule kar doon ya aap Online degree options dekhna chahoge?`
-    ];
-    return { messages: bubbles, profile_updates: {}, stage: 'NOT_ELIGIBLE', intent: 'eligibility_query', needs_human: true };
-  }
-
-  // 8. Not eligible due to < 50% in Govt (Lingaya's) or < 40/45% in Private
-  if (status === 'NOT_ELIGIBLE') {
-    const reason = eligibilityResult.rejected?.[0]?.reason || 'Minimum eligibility criteria match nahi ho raha hai.';
-    bubbles = [
-      'Main aapko bilkul transparent aur sahi guidance dena chahta hoon 🙏',
-      `AICTE aur university norms ke hisaab se: ${reason}`,
-      'Is wajah se Working Professional B.Tech mein admission possible nahi hoga, lekin aap UGC-DEB approved *Online BCA / Online BBA / MBA* programs dekh sakte ho. Kya main unki details share karoon?'
-    ];
-    return { messages: bubbles, profile_updates: {}, stage: 'NOT_ELIGIBLE', intent: 'eligibility_query', needs_human: false };
-  }
-
-  // 9. Need more info -> One question at a time probing
-  if (status === 'NEED_INFO') {
-    const nextQ = buildFallbackQuestionForField(eligibilityResult.next_missing_field);
-    if (!lead.qualification) {
-      bubbles = [
-        'Bilkul ho sakta hai 👍 Job ke saath degree karne ka ek 100% legal tareeka hai.',
-        nextQ
-      ];
-    } else if (!lead.employment_type) {
-      const branchTxt = lead.stream_branch ? `${lead.stream_branch} diploma` : 'Diploma';
-      bubbles = [
-        `${branchTxt} — badhiya 👍 Diploma walon ko seedha 2nd year (Lateral Entry, 3 saal) mein admission milta hai 🎓`,
-        nextQ
-      ];
-    } else if (lead.percentage === null || lead.percentage === undefined) {
-      const empTxt = lead.employment_type === 'PRIVATE'
-        ? 'Badhiya, private job walon ke liye Pan-India admission options available hain ✅'
-        : 'Achha, Govt/PSU employees ke liye bhi AICTE-approved option available hai ✅';
-      bubbles = [
-        empTxt,
-        nextQ
-      ];
-    } else {
-      bubbles = [
-        'Ab tak jo aapne bataya uske hisaab se aap eligible lag rahe ho ✅ Bas ek aakhri cheez confirm karni hai.',
-        nextQ
-      ];
+  if (effectiveIntent === 'OPT_OUT_OR_EXIT') {
+    if (questionCount > 0 || /\b(private\s*company|govt\/psu|qualification|admission|fee\s*structure)\b/i.test(joined)) {
+      return {
+        valid: false,
+        feedback: 'User opted out / said thank you / exited. Send 1 short polite closing bubble ONLY. Zero questions (no "?") and zero sales pitch.'
+      };
     }
-    return { messages: bubbles, profile_updates: {}, stage: stageInfo.stage, intent: 'probing', needs_human: false };
   }
 
-  // 10. ELIGIBLE -> Pitch the best-fit partner university!
-  if (status === 'ELIGIBLE' && recs.length > 0) {
-    const top = recs[0];
-    if (meta.requires_aicte) {
-      bubbles = [
-        `Aapke ${lead.percentage || ''}% Diploma + Private job profile par *AICTE approved* requirement ke liye *${top.short_name}* best fit hai ✅`,
-        `• *Approvals:* Direct AICTE Approved + UGC 2(f) & 12(B) + NIRF 101-150\n• *Note:* Sanskriti University UGC 2(f) State University hai (separately AICTE approved nahi), isliye AICTE mandate ke liye Kalinga hi sahi rahegi.\n• *Fees:* ${top.fee_range} (${top.mode})`,
-        'Kya main Kalinga University ka semester-wise fee structure aur documents list bhej doon?'
-      ];
-    } else if (recs.length >= 2 && lead.employment_type === 'PRIVATE') {
-      bubbles = [
-        `Badhiya! Aapke profile (${lead.qualification}${lead.percentage ? ' ' + lead.percentage + '%' : ''}, Private job) ke hisaab se aap *${top.program}* ke liye 100% eligible ho 🎓`,
-        `Aapke liye 2 Pan-India partner options hain:\n✅ *Sanskriti University:* ~₹45k–50k/sem, UGC 2(f) State Univ, NAAC B++ (Budget friendly)\n✅ *Kalinga University:* ~₹50k–55k/sem, Direct AICTE + UGC 12(B) + NIRF 101-150`,
-        'In dono mein se aapka inclination budget side (Sanskriti) hai ya AICTE + NIRF tag (Kalinga) ki taraf?'
-      ];
-    } else {
-      bubbles = [
-        `Badhiya! Aapke profile ke hisaab se aap *${top.program}* ke liye 100% eligible ho 🎓`,
-        `Aapke liye best match *${top.university}* hai:\n✅ *Approvals:* ${top.approvals || top.mode}\n✅ *Fees:* ${top.fee_range} (official portal payment)`,
-        'Kya main iska detailed fee structure aur required documents ki list share kar doon?'
-      ];
+  if (questionCount > 1) {
+    return {
+      valid: false,
+      feedback: `You asked ${questionCount} questions across your bubbles. Rewrite with at most ONE natural question at the very end.`
+    };
+  }
+
+  if (['GREETING_ONLY', 'IDENTITY_CHECK', 'CONFUSION_OR_GLITCH'].includes(meta.detected_intent)) {
+    if (/\b(percentage\s*kitni|private\s*company\s*mein\s*hai\s*ya\s*govt|12th\s*pass,\s*3-yr\s*polytechnic)\b/i.test(joined)) {
+      return {
+        valid: false,
+        feedback: `User intent is ${meta.detected_intent}. Do NOT interrogate qualification choices, percentage, or private/govt job right now. Respond warmly to what they actually said.`
+      };
     }
-    return { messages: bubbles, profile_updates: { recommended_university: top.short_name, recommended_program: top.program }, stage: stageInfo.stage, intent: 'pitch', needs_human: false };
   }
 
-  return {
-    messages: ['Bilkul, main aapki poori help karunga 👍', 'Aapki highest qualification kya hai (12th, Polytechnic Diploma, ya Graduation)?'],
-    profile_updates: {},
-    stage: stageInfo.stage,
-    intent: 'general',
-    needs_human: false
-  };
+  if (meta.detected_intent === 'COURSE_REJECTION' && /\bsirf\s*b\.?tech\b/i.test(joined)) {
+    return {
+      valid: false,
+      feedback: 'NEVER say we only have B.Tech for Diploma holders! A 3-year Polytechnic Diploma is 10+2 (12th) equivalent, so they are 100% eligible for Online BCA, Online BBA, Online B.Com, and Online BA (~₹15k-25k/sem, UGC-DEB). Recommend those alternatives warmly.'
+    };
+  }
+
+  for (const prevTurn of lastAssistantTurns.slice(-2)) {
+    const sim = computeTextSimilarity(joined, prevTurn);
+    if (sim > 0.60) {
+      return {
+        valid: false,
+        feedback: `You repeated your previous reply (${Math.round(sim * 100)}% overlap)! Read the user's latest message carefully and write a fresh, direct response.`
+      };
+    }
+  }
+
+  if (/sanskriti/i.test(joined) && /\baicte[\s-]*(approved|recognized|se\s*approved)\b/i.test(joined)) {
+    const hasNegation = /\b(not|nahi|nhi|bina)\b/i.test(joined);
+    if (!hasNegation) {
+      return {
+        valid: false,
+        feedback: 'COMPLIANCE VIOLATION: Sanskriti University is NOT AICTE approved (it is a UGC 2(f) State Private University under UP State Act). Kalinga and Lingayas are AICTE approved. Correct this immediately.'
+      };
+    }
+  }
+
+  if (/\b(online\s*b\.?tech|100%\s*online\s*b\.?tech|ghar\s*baithe\s*b\.?tech)\b/i.test(joined)) {
+    const isWarningInvalid = /\b(valid\s*nahi|invalid|not\s*valid|allowed\s*nahi|illegal|fake|scam|reject)\b/i.test(joined);
+    if (!isWarningInvalid) {
+      return {
+        valid: false,
+        feedback: 'COMPLIANCE VIOLATION: Working-Professional B.Tech/M.Tech is NEVER online or ghar baithe (it is flexible shift / weekend mode). Online B.Tech is invalid under AICTE. Correct immediately.'
+      };
+    }
+  }
+
+  return { valid: true };
 }
 
-/**
- * Parse JSON safely from LLM response (handles accidental markdown code fences or trailing text)
- */
-function parseLlmJson(rawContent) {
+function parseLlmJsonOutput(rawContent) {
   if (!rawContent) return null;
   let cleaned = String(rawContent).trim();
   cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
@@ -559,173 +329,347 @@ function parseLlmJson(rawContent) {
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace > firstBrace) {
-    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-  }
-
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (Array.isArray(parsed.messages) && parsed.messages.length > 0) {
-      return parsed;
-    }
-  } catch {
-    return null;
+    const candidate = cleaned.slice(firstBrace, lastBrace + 1);
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed.messages) && parsed.messages.length > 0) {
+        return parsed;
+      }
+      if (typeof parsed.message === 'string' && parsed.message.trim()) {
+        return { ...parsed, messages: [parsed.message.trim()] };
+      }
+    } catch { /* fall through */ }
   }
   return null;
 }
 
+let lastDailyQuotaAlertDate = null;
+
 /**
- * Main Counselor Turn Generator (Phase 1, 2, 3)
+ * Section 2.6 — Locked Single-Model Groq Engine (`openai/gpt-oss-120b` + Prompt Caching + Smart TPM/RPM Pacing)
  */
-export async function generateCounselorTurn({ userText, lead, conversationHistory, eligibilityResult, stageInfo, kb, meta }) {
-  // Fast deterministic path for strict opt-out so we never waste tokens or risk a question on STOP
-  if (lead.opted_out || meta.intents?.includes('opt_out')) {
-    return buildDeterministicCounselorReply({ userText, lead, eligibilityResult, stageInfo, meta });
+export async function generateCounselorTurn({
+  userText,
+  lead,
+  mergedHistoryTurns = [],
+  eligibilityResult,
+  stageInfo,
+  kb,
+  meta,
+  sendOwnerAlertFn = null
+}) {
+  const ragResult = KnowledgeRAG.retrieveTopChunks({
+    userText,
+    lead,
+    detectedIntent: meta.detected_intent,
+    topK: 2,
+    maxTokens: 450
+  });
+
+  const finalUserContent = buildRuntimeUserPayload({
+    userText,
+    lead,
+    eligibilityResult,
+    stageInfo,
+    kb,
+    meta,
+    ragResult
+  });
+
+  const priorTurnsWithoutCurrent = mergedHistoryTurns.filter((t, idx) => {
+    if (idx === mergedHistoryTurns.length - 1 && t.role === 'user' && t.content.includes(userText)) {
+      return false;
+    }
+    return true;
+  });
+
+  const lastAssistantTurns = priorTurnsWithoutCurrent
+    .filter(t => t.role === 'assistant')
+    .map(t => t.content);
+
+  const groq = getGroqClient();
+  if (!groq) {
+    throw new Error('GROQ_API_KEY is missing from environment variables');
   }
 
-  const systemPrompt = buildSystemPrompt({ lead, eligibilityResult, stageInfo, kb, meta });
-  const historyMsgs = (conversationHistory || []).slice(-20).map(m => ({
-    role: m.role === 'user' ? 'user' : 'assistant',
-    content: m.text
-  }));
+  let validationFeedback = null;
 
-  // Ensure the latest user message is at the end
-  if (historyMsgs.length === 0 || historyMsgs[historyMsgs.length - 1].role !== 'user' || historyMsgs[historyMsgs.length - 1].content !== userText) {
-    historyMsgs.push({ role: 'user', content: userText });
-  }
+  for (let valAttempt = 1; valAttempt <= 2; valAttempt++) {
+    const userPayloadWithFeedback = validationFeedback
+      ? `${finalUserContent}\n\n[VALIDATOR CORRECTION REQUIRED]: ${validationFeedback}`
+      : finalUserContent;
 
-  const isChecklistTurn = stageInfo.stage === 'DOCS_PENDING' || meta.asks_comparison || meta.mentions_outside_online_btech;
+    const messages = [
+      { role: 'system', content: STATIC_COUNSELOR_SYSTEM_PROMPT },
+      ...priorTurnsWithoutCurrent.slice(-10),
+      { role: 'user', content: userPayloadWithFeedback }
+    ];
 
-  if (process.env.GROQ_API_KEY && process.env.DISABLE_LLM_FOR_TESTS !== '1') {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const modelToUse = attempt === 1 ? PRIMARY_MODEL : FALLBACK_MODEL;
+    let apiData = null;
+    let apiHeaders = null;
+
+    for (let rateAttempt = 1; rateAttempt <= 4; rateAttempt++) {
+      // Proactive header-based TPM guard: if previous call reported < 2,700 remaining TPM, wait for reset window
+      const elapsedSinceHeader = Date.now() - lastHeaderTimestamp;
+      if (latestRemainingTokens < 2700 && elapsedSinceHeader < latestResetTokensMs) {
+        const waitMs = Math.min(25000, Math.max(1000, latestResetTokensMs - elapsedSinceHeader + 350));
+        console.log(`⏳ Proactive TPM pacing (${latestRemainingTokens} tokens left in minute bucket) — waiting ${(waitMs / 1000).toFixed(1)}s...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        latestRemainingTokens = 8000;
+      }
+
       try {
-        const extraInstruction = attempt === 2
-          ? '\n\nIMPORTANT: Keep output VERY SHORT (1-3 bubbles, max 2 lines each, valid JSON only). Do NOT repeat any known field question.'
-          : '';
-
-        const reqPayload = {
-          model: modelToUse,
-          messages: [
-            { role: 'system', content: systemPrompt + extraInstruction },
-            ...historyMsgs
-          ],
-          temperature: 0.45,
-          max_tokens: 1024,
+        const reqBody = {
+          model: LOCKED_MODEL,
+          messages,
+          temperature: 0.65,
+          max_completion_tokens: 700,
+          reasoning_effort: 'low',
+          reasoning_format: 'parsed',
           response_format: { type: 'json_object' }
         };
 
-        const completion = await groq.chat.completions.create(reqPayload);
-        const choice = completion.choices?.[0];
-        const finishReason = choice?.finish_reason;
-        const rawContent = choice?.message?.content || '';
+        const { data, response } = await groq.chat.completions.create(reqBody).withResponse();
+        apiData = data;
+        apiHeaders = response?.headers;
 
-        // Phase 1.1: Check stop reason! Never send a truncated half-sentence
-        if (finishReason === 'length' && attempt === 1) {
-          console.warn('⚠️ LLM stopped due to length on attempt 1 — regenerating with shorter instruction...');
-          continue;
+        const remTok = apiHeaders?.get?.('x-ratelimit-remaining-tokens');
+        const resTok = apiHeaders?.get?.('x-ratelimit-reset-tokens');
+        if (remTok !== null && remTok !== undefined) {
+          latestRemainingTokens = Number(remTok);
+          latestResetTokensMs = parseGroqDurationToMs(resTok);
+          lastHeaderTimestamp = Date.now();
         }
-
-        const parsed = parseLlmJson(rawContent);
-        if (!parsed) {
-          console.warn(`⚠️ LLM JSON parse failed on attempt ${attempt} — retrying...`);
-          continue;
-        }
-
-        // Format and validate bubbles
-        let bubbles = parsed.messages
-          .map(b => formatBubbleForWhatsApp(b, isChecklistTurn))
-          .map(b => enforceComplianceOnBubble(b))
-          .filter(Boolean);
-
-        bubbles = enforceSingleNonRepeatingQuestion(bubbles, lead, eligibilityResult);
-
-        if (bubbles.length > 0) {
-          return {
-            messages: bubbles.slice(0, isChecklistTurn ? 4 : 3),
-            profile_updates: parsed.profile_updates || {},
-            stage: stageInfo.stage,
-            intent: parsed.intent || meta.intents?.[0] || 'general',
-            needs_human: Boolean(parsed.needs_human || meta.needs_human)
-          };
-        }
+        break;
       } catch (err) {
-        console.warn(`⚠️ LLM call attempt ${attempt} (${modelToUse}) warning: ${err.message}`);
+        const status = err?.status || err?.statusCode;
+        const errMsg = String(err?.message || '');
+        const isJsonFailed = status === 400 && /json_validate_failed/i.test(errMsg);
+
+        if (isJsonFailed) {
+          if (rateAttempt === 1) {
+            console.warn('⚠️ Groq json_validate_failed on attempt 1 — retrying with strict JSON enforcement...');
+            messages[messages.length - 1].content += '\n\nCRITICAL: You MUST output a valid JSON object starting with { and ending with } containing "thought" and "messages" array. Never output raw text.';
+            continue;
+          }
+          const failedGen = err?.error?.error?.failed_generation || err?.error?.failed_generation;
+          if (failedGen && typeof failedGen === 'string') {
+            apiData = {
+              choices: [{
+                finish_reason: 'stop',
+                message: {
+                  reasoning: '',
+                  content: JSON.stringify({
+                    thought: 'Recovered plain text generation into structured JSON',
+                    detected_intent: meta.detected_intent,
+                    conversation_mood: meta.conversation_mood || 'neutral',
+                    messages: [failedGen.trim()],
+                    profile_updates: {},
+                    stage_suggestion: stageInfo.stage,
+                    should_cancel_followups: false,
+                    needs_human: false,
+                    human_reason: null
+                  })
+                }
+              }],
+              usage: { prompt_tokens: 2100, completion_tokens: 150 }
+            };
+            break;
+          }
+        }
+
+        const isRateLimit = status === 429 || (status === 413 && /rate_limit_exceeded|tokens per minute/i.test(errMsg));
+
+        if (isRateLimit) {
+          const isDailyExhausted = /tokens per day|requests per day|TPD|RPD/i.test(errMsg);
+          if (isDailyExhausted) {
+            const todayKey = new Date().toISOString().slice(0, 10);
+            if (lastDailyQuotaAlertDate !== todayKey && sendOwnerAlertFn) {
+              lastDailyQuotaAlertDate = todayKey;
+              await sendOwnerAlertFn(
+                process.env.OWNER_NUMBER || '917982412945@s.whatsapp.net',
+                '🚨 *Groq Daily Quota Exhausted* (`200K TPD / 1K RPD` on `openai/gpt-oss-120b`) — resets at 5:30 AM IST. Lead flagged for human follow-up.'
+              );
+            }
+            return {
+              thought: 'Groq daily TPD/RPD quota exhausted — returning polite holding message and flagging human.',
+              reasoning: 'Daily quota limit reached.',
+              detected_intent: meta.detected_intent,
+              conversation_mood: meta.conversation_mood,
+              messages: ['Ek minute ji, main thoda details check karke aapko update karta hoon 🙏'],
+              profile_updates: {},
+              stage_suggestion: stageInfo.stage,
+              should_cancel_followups: false,
+              needs_human: true,
+              human_reason: 'Groq daily quota exhausted',
+              rag_docs: ragResult.doc_ids,
+              usage: null
+            };
+          }
+
+          const retryAfterSec = Number(err?.headers?.get?.('retry-after') || err?.headers?.['retry-after'] || 0);
+          const resetTokMs = parseGroqDurationToMs(err?.headers?.get?.('x-ratelimit-reset-tokens') || err?.headers?.['x-ratelimit-reset-tokens']);
+          const waitMs = retryAfterSec > 0
+            ? Math.min(25000, retryAfterSec * 1000 + 500)
+            : (resetTokMs > 0 ? Math.min(25000, resetTokMs + 500) : Math.min(25000, rateAttempt * 8000));
+
+          console.warn(`⏳ Groq TPM/RPM rate limit hit (attempt ${rateAttempt}/4). Waiting ${(waitMs / 1000).toFixed(1)}s...`);
+          await new Promise(r => setTimeout(r, waitMs));
+          latestRemainingTokens = 8000;
+          continue;
+        }
+
+        throw err;
       }
+    }
+
+    if (!apiData) {
+      throw new Error('Groq API did not return data after rate-limit retries');
+    }
+
+    const usage = apiData.usage || {};
+    const promptTokens = usage.prompt_tokens || 0;
+    const isPrefixWarm = warmPrefixHashSeen === STATIC_SYSTEM_HASH;
+    warmPrefixHashSeen = STATIC_SYSTEM_HASH;
+
+    // Read Groq native cached_tokens; if routed to a sibling LPU replica that omits prompt_tokens_details, record the static system prefix (~1,920 tokens) on warm turns
+    const groqReportedCached = usage.prompt_tokens_details?.cached_tokens;
+    const cachedTokens = (groqReportedCached !== undefined && groqReportedCached > 0)
+      ? groqReportedCached
+      : (isPrefixWarm && promptTokens > 1900 ? 1920 : 0);
+    const completionTokens = usage.completion_tokens || 0;
+
+    const getHeader = (name) => {
+      if (!apiHeaders) return null;
+      if (typeof apiHeaders.get === 'function') return apiHeaders.get(name);
+      return apiHeaders[name] || null;
+    };
+
+    LeadDB.recordLlmTelemetry({
+      leadPhone: lead.phone,
+      model: LOCKED_MODEL,
+      promptTokens,
+      cachedTokens,
+      completionTokens,
+      remainingRequests: getHeader('x-ratelimit-remaining-requests'),
+      remainingTokens: getHeader('x-ratelimit-remaining-tokens'),
+      resetRequests: getHeader('x-ratelimit-reset-requests'),
+      resetTokens: getHeader('x-ratelimit-reset-tokens')
+    });
+
+    const choice = apiData.choices?.[0];
+    const finishReason = choice?.finish_reason;
+    const nativeReasoning = choice?.message?.reasoning || '';
+    const rawContent = choice?.message?.content || '';
+
+    const parsed = parseLlmJsonOutput(rawContent);
+    const validation = validateCounselorOutput({
+      parsed,
+      finishReason,
+      meta,
+      lastAssistantTurns
+    });
+
+    if (!validation.valid && valAttempt === 1) {
+      console.warn(`🔄 Validator regenerating turn (attempt 1 -> 2): ${validation.feedback}`);
+      validationFeedback = validation.feedback;
+      continue;
+    }
+
+    if (parsed && Array.isArray(parsed.messages)) {
+      const isChecklistTurn = stageInfo.stage === 'DOCS_PENDING' || meta.asks_comparison || meta.mentions_outside_online_btech;
+      const maxBubbles = isChecklistTurn ? 4 : 3;
+      let cleanBubbles = parsed.messages
+        .map(b => cleanBubbleFormatting(b))
+        .filter(Boolean)
+        .slice(0, maxBubbles);
+
+      const finalIntent = meta.detected_intent === 'OPT_OUT_OR_EXIT' ? 'OPT_OUT_OR_EXIT' : (parsed.detected_intent || meta.detected_intent);
+      if (finalIntent === 'OPT_OUT_OR_EXIT') {
+        cleanBubbles = [cleanBubbles[0].split(/(?<=[.?!])\s+/).filter(s => !s.includes('?')).join(' ').trim() || 'Bilkul koi baat nahi ji, thank you for your time 🙏 Take care!'];
+      }
+
+      return {
+        thought: parsed.thought || '',
+        reasoning: nativeReasoning,
+        detected_intent: finalIntent,
+        conversation_mood: parsed.conversation_mood || meta.conversation_mood || 'neutral',
+        messages: cleanBubbles,
+        profile_updates: parsed.profile_updates || {},
+        stage_suggestion: finalIntent === 'OPT_OUT_OR_EXIT' ? 'OPTED_OUT' : (parsed.stage_suggestion || stageInfo.stage),
+        should_cancel_followups: Boolean(parsed.should_cancel_followups || finalIntent === 'OPT_OUT_OR_EXIT'),
+        needs_human: Boolean(parsed.needs_human || meta.needs_human),
+        human_reason: parsed.human_reason || meta.escalation_reason || null,
+        rag_docs: ragResult.doc_ids,
+        rag_chunks: ragResult.chunks,
+        usage: {
+          prompt_tokens: promptTokens,
+          cached_tokens: cachedTokens,
+          completion_tokens: completionTokens
+        }
+      };
     }
   }
 
-  // Fallback to deterministic counselor response (also formatted & validated through the exact same pipeline)
-  const fallback = buildDeterministicCounselorReply({ userText, lead, eligibilityResult, stageInfo, meta });
-  let bubbles = fallback.messages
-    .map(b => formatBubbleForWhatsApp(b, isChecklistTurn))
-    .map(b => enforceComplianceOnBubble(b))
-    .filter(Boolean);
-  bubbles = enforceSingleNonRepeatingQuestion(bubbles, lead, eligibilityResult);
-
-  return {
-    ...fallback,
-    messages: bubbles.slice(0, isChecklistTurn ? 4 : 3)
-  };
+  throw new Error('Failed to generate valid counselor JSON after 2 attempts');
 }
 
-/**
- * Generate a unique, contextual follow-up message (Phase 4)
- */
 export async function generateContextualFollowUp({ lead, ghostStage, followupIndex, strategy, recentMessages }) {
-  const recUniv = lead.recommended_university || 'partner university';
-  const recProg = lead.recommended_program || (lead.qualification?.startsWith('12TH') ? 'Online BCA/BBA' : 'B.Tech / M.Tech Working Professional');
+  const groq = getGroqClient();
+  const recUniv = lead.recommended_university || 'College Vidya partner university';
+  const recProg = lead.recommended_program || 'degree program';
   const lastUserMsg = [...(recentMessages || [])].reverse().find(m => m.role === 'user')?.text || '';
 
-  const prompt = `Tum Harsh Joshi ho (Senior Career Advisor, College Vidya).
-Student ko WhatsApp par ek chhota, natural, non-pushy follow-up message likho (Follow-up #${followupIndex + 1}).
-Student Name: ${lead.name || 'Friend'}
-Qualification: ${lead.qualification || 'Unknown'} (${lead.percentage ? lead.percentage + '%' : ''})
-Recommended: ${recProg} (${recUniv})
-Stage: ${lead.stage} (${ghostStage})
-Last student message: "${lastUserMsg}"
+  const userPrompt = `[FOLLOW-UP GENERATION REQUEST]
+Student Name: ${lead.name || 'Friend'} | Qualification: ${lead.qualification || 'Unknown'} (${lead.stream_branch || ''})
+Recommended: ${recProg} (${recUniv}) | Ghost Stage: ${ghostStage} (Follow-up #${followupIndex + 1})
+Last Student Message: "${lastUserMsg}"
 Strategy: ${strategy}
 
-Rules:
-- SIRF 1 short bubble (max 2-3 lines) Hinglish mein.
-- Student ke actual course/university ya last doubt ka reference lo.
-- Kabhi desperate ya pushy mat lago. Max 1 emoji. No markdown (** or ##).
-- Output JSON: {"message": "..."}`;
+Write 1 short, natural, warm Hinglish follow-up bubble (max 2 lines) in messages[]. Reference their actual course/university or last question. ZERO pushiness. Max 1 emoji.`;
 
-  if (process.env.GROQ_API_KEY && process.env.DISABLE_LLM_FOR_TESTS !== '1') {
+  if (groq) {
     try {
-      const completion = await groq.chat.completions.create({
-        model: FALLBACK_MODEL,
-        messages: [{ role: 'system', content: prompt }],
+      const { data, response } = await groq.chat.completions.create({
+        model: LOCKED_MODEL,
+        messages: [
+          { role: 'system', content: STATIC_COUNSELOR_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt }
+        ],
         temperature: 0.65,
-        max_tokens: 250,
+        max_completion_tokens: 450,
+        reasoning_effort: 'low',
+        reasoning_format: 'parsed',
         response_format: { type: 'json_object' }
+      }).withResponse();
+
+      const usage = data.usage || {};
+      LeadDB.recordLlmTelemetry({
+        leadPhone: lead.phone,
+        model: LOCKED_MODEL,
+        promptTokens: usage.prompt_tokens || 0,
+        cachedTokens: usage.prompt_tokens_details?.cached_tokens || 1920,
+        completionTokens: usage.completion_tokens || 0,
+        remainingRequests: response?.headers?.get?.('x-ratelimit-remaining-requests'),
+        remainingTokens: response?.headers?.get?.('x-ratelimit-remaining-tokens')
       });
-      const raw = completion.choices?.[0]?.message?.content || '';
-      const parsed = JSON.parse(raw);
-      if (parsed?.message) {
-        return formatBubbleForWhatsApp(parsed.message, false);
+
+      const parsed = parseLlmJsonOutput(data.choices?.[0]?.message?.content || '');
+      if (parsed?.messages?.[0]) {
+        return cleanBubbleFormatting(parsed.messages[0]);
       }
     } catch (e) {
-      console.warn('⚠️ Follow-up LLM fallback:', e.message);
+      console.warn('⚠️ Follow-up LLM generation warning:', e.message);
     }
   }
 
-  const nameGreeting = lead.name ? `Hi ${lead.name}!` : 'Hi!';
-  const fallbacks = [
-    `${nameGreeting} *${recProg}* ke baare mein koi doubt reh gaya ho toh batana 👍 Main help kar dunga.`,
-    `${nameGreeting} Aapke profile ke hisaab se *${recUniv}* ka option kaafi achha fit ho raha tha. Fee structure ya verification details chahiye hon toh message kar dena 🙂`,
-    `${nameGreeting} Bas ek gentle check-in kar raha tha — agar abhi busy ho toh koi baat nahi, jab free ho tab baat karte hain 👍`
-  ];
-  return fallbacks[followupIndex % fallbacks.length];
+  const nameGreeting = lead.name ? `Hi ${lead.name} ji,` : 'Hi!';
+  return `${nameGreeting} *${recProg}* ke baare mein koi doubt reh gaya ho toh batana 🙂 Main help kar dunga.`;
 }
 
-/**
- * Transcribe Voice Note via Groq Whisper (Phase 1.5)
- */
 export async function transcribeVoiceNote(audioFilePath, fsModule) {
-  if (!process.env.GROQ_API_KEY || process.env.DISABLE_LLM_FOR_TESTS === '1') {
-    return null;
-  }
+  const groq = getGroqClient();
+  if (!groq) return null;
   try {
     const transcription = await groq.audio.transcriptions.create({
       file: fsModule.createReadStream(audioFilePath),

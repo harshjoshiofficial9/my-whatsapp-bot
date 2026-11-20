@@ -7,12 +7,13 @@ import {
 import fs from 'fs';
 import path from 'path';
 import qrcode from 'qrcode-terminal';
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
 
-import { LeadDB, STORAGE_PATHS } from './database.js';
+import { LeadDB, STORAGE_PATHS, db } from './database.js';
 import { startCrmServer } from './crmServer.js';
 import {
-  enqueueIncomingUserMessage,
+  handleIncomingMessage,
   sendSingleBubbleWithRetry,
   sendMultiBubbleHumanTurn,
   flushOutboundQueue
@@ -43,7 +44,7 @@ let isStartingSocket = false;
 let globalAiPaused = false;
 let lastDailyReportDateIST = null;
 
-const DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 8500);
+const DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 7000);
 
 function getSock() {
   return connectionStatus === 'CONNECTED' ? activeSock : null;
@@ -57,9 +58,6 @@ function getConnectionInfo() {
   };
 }
 
-/**
- * Helper to send raw message (for Owner alerts, reports, commands)
- */
 export async function sendRawWhatsAppMessage(jid, text, options = {}) {
   const norm = LeadDB.normalizePhoneJid(jid);
   const role = options.asHuman ? 'human' : 'bot';
@@ -76,9 +74,6 @@ export async function sendRawWhatsAppMessage(jid, text, options = {}) {
   });
 }
 
-/**
- * Extract normalized student JID & map @lid to @s.whatsapp.net when available
- */
 function resolveAndMapSenderJid(msg) {
   const remoteJid = msg.key?.remoteJid || '';
   const senderPn = msg.key?.senderPn || msg.key?.participantPn || msg.participant || null;
@@ -92,9 +87,6 @@ function resolveAndMapSenderJid(msg) {
   return LeadDB.normalizePhoneJid(remoteJid);
 }
 
-/**
- * Check if JID is a non-student broadcast/group/newsletter
- */
 function isIgnoredJid(jid) {
   if (!jid) return true;
   return (
@@ -118,7 +110,6 @@ export async function startBot() {
       reconnectTimer = null;
     }
 
-    // Clean up previous socket instance if any
     if (activeSock) {
       try {
         activeSock.ev.removeAllListeners();
@@ -135,7 +126,6 @@ export async function startBot() {
       browser: ['Mac OS', 'Chrome', '120.0.0'],
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
-      // Phase 1.6: getMessage from SQLite so Baileys decryption & retry receipts work
       getMessage: async (key) => {
         return LeadDB.getRawMessageByWaId(key?.id) || { conversation: '' };
       }
@@ -144,7 +134,6 @@ export async function startBot() {
     activeSock = sock;
     sock.ev.on('creds.update', saveCreds);
 
-    // Map LIDs when contacts update
     sock.ev.on('contacts.upsert', (contacts) => {
       for (const c of contacts || []) {
         if (c.lid && c.id && c.id.endsWith('@s.whatsapp.net')) {
@@ -153,13 +142,11 @@ export async function startBot() {
       }
     });
 
-    // Track message delivery & read receipts (Phase 1.1 & Phase 5.4)
     sock.ev.on('messages.update', (updates) => {
       for (const u of updates || []) {
         const msgId = u.key?.id;
         const st = u.update?.status;
         if (!msgId || !st) continue;
-        // Baileys status codes: 3 = DELIVERED, 4 = READ, 5 = PLAYED
         if (st === 3 || st === 'DELIVERY_ACK') {
           LeadDB.updateMessageStatus(msgId, 'DELIVERED');
         } else if (st === 4 || st === 5 || st === 'READ' || st === 'PLAYED') {
@@ -168,7 +155,6 @@ export async function startBot() {
       }
     });
 
-    // Connection Lifecycle & Reconnect with Exponential Backoff
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
@@ -186,11 +172,11 @@ export async function startBot() {
         reconnectAttempts = 0;
 
         console.log('\n✅ College Vidya Counselor Bot & CRM ACTIVE! 🎓');
-        console.log(`   Storage DB: ${STORAGE_PATHS.dbPath}`);
-        console.log(`   Auth Dir:   ${STORAGE_PATHS.authDir}`);
-        console.log(`   Owner JID:  ${OWNER_NUMBER}\n`);
+        console.log(`   Storage DB:    ${STORAGE_PATHS.dbPath}`);
+        console.log(`   Auth Dir:      ${STORAGE_PATHS.authDir}`);
+        console.log(`   Knowledge Dir: ${STORAGE_PATHS.knowledgeDir}`);
+        console.log(`   Locked LLM:    ${process.env.LLM_MODEL || 'openai/gpt-oss-120b'}\n`);
 
-        // Flush any queued messages that failed while disconnected
         const flushed = await flushOutboundQueue({ getSock });
         if (flushed > 0) {
           console.log(`📬 Flushed ${flushed} queued outbound messages after reconnect.`);
@@ -205,11 +191,10 @@ export async function startBot() {
         if (isLoggedOut) {
           connectionStatus = 'LOGGED_OUT';
           latestQrCode = null;
-          console.warn('⚠️ Previous WhatsApp session expired/logged out. Clearing stale auth credentials and generating a fresh QR Code in 3s...');
+          console.warn('⚠️ Previous WhatsApp session expired/logged out. Clearing stale auth files and generating a fresh QR Code in 3s...');
           try {
             const files = fs.readdirSync(STORAGE_PATHS.authDir);
             for (const f of files) {
-              // Keep crm.db, backups, uploads if they share the directory; delete only Baileys auth JSON files
               if (f.endsWith('.json')) {
                 fs.unlinkSync(path.join(STORAGE_PATHS.authDir, f));
               }
@@ -238,7 +223,6 @@ export async function startBot() {
     // 📩 INCOMING & OUTGOING MESSAGE HANDLER
     // ============================================================
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      // Phase 1.3: Process only real-time notify events (ignore history sync)
       if (type !== 'notify') return;
 
       for (const msg of messages || []) {
@@ -247,7 +231,6 @@ export async function startBot() {
         const rawRemoteJid = msg.key.remoteJid;
         if (isIgnoredJid(rawRemoteJid)) continue;
 
-        // Ignore protocol, reaction, poll, or ephemeral wrapper noise
         if (
           msg.message.protocolMessage ||
           msg.message.reactionMessage ||
@@ -258,14 +241,6 @@ export async function startBot() {
         }
 
         const msgId = msg.key.id;
-        // Phase 1.3: Idempotency check
-        if (msgId && LeadDB.isMessageProcessed(msgId)) {
-          continue;
-        }
-        if (msgId) {
-          LeadDB.markMessageProcessed(msgId);
-        }
-
         const senderJid = resolveAndMapSenderJid(msg);
         const textContent = (
           msg.message.conversation ||
@@ -280,6 +255,8 @@ export async function startBot() {
 
         // 1. Handle Owner Commands (/report, /hot, /lead, /takeover, /release, /pause, /resume, /say)
         if (textContent.startsWith('/') && (isOwnerSender || msg.key.fromMe)) {
+          if (msgId && LeadDB.isMessageProcessed(msgId)) continue;
+          if (msgId) LeadDB.markMessageProcessed(msgId);
           await handleOwnerCommand({
             text: textContent,
             sendRawMessageFn: sendRawWhatsAppMessage,
@@ -289,13 +266,12 @@ export async function startBot() {
           continue;
         }
 
-        // 2. Phase 1.6 & 5.6: Handle `fromMe` messages (Human advisor replying from linked WhatsApp phone!)
+        // 2. Handle `fromMe` messages (Human advisor replying from linked WhatsApp phone!)
         if (msg.key.fromMe) {
-          // If this message ID was sent by the bot itself, ignore
-          if (msgId && LeadDB.isBotSentId(msgId)) {
-            continue;
-          }
-          // If owner messaged a student directly from the linked phone -> log & auto-switch lead to HUMAN mode for 12h!
+          if (msgId && LeadDB.isBotSentId(msgId)) continue;
+          if (msgId && LeadDB.isMessageProcessed(msgId)) continue;
+          if (msgId) LeadDB.markMessageProcessed(msgId);
+
           if (!isOwnerSender && textContent) {
             console.log(`🧑 Linked-phone reply detected to ${senderJid} -> Auto-switching lead to HUMAN mode for 12h.`);
             LeadDB.addMessage(senderJid, 'human', textContent, { waMsgId: msgId, status: 'SENT' });
@@ -308,14 +284,11 @@ export async function startBot() {
           continue;
         }
 
-        // Never treat owner's personal number as a student lead
-        if (senderJid === OWNER_NUMBER) {
-          continue;
-        }
+        if (senderJid === OWNER_NUMBER) continue;
 
-        // 3. Phase 1.5: Media Handling (Voice Notes, Images/PDF Documents, Stickers)
         // 3a. Voice Note / Audio Message
         if (msg.message.audioMessage) {
+          if (msgId && LeadDB.isMessageProcessed(msgId)) continue;
           try {
             const buffer = await downloadMediaMessage(msg, 'buffer', {});
             const audioFile = path.join(STORAGE_PATHS.uploadsDir, `voice_${Date.now()}_${msgId}.ogg`);
@@ -325,9 +298,10 @@ export async function startBot() {
 
             if (transcript) {
               console.log(`🎙️ Voice note transcribed from ${senderJid}: "${transcript}"`);
-              await enqueueIncomingUserMessage({
+              await handleIncomingMessage({
                 phone: senderJid,
                 text: transcript,
+                source: 'baileys',
                 msgKey: msg.key,
                 rawProto: msg.message,
                 mediaType: 'audio',
@@ -337,6 +311,7 @@ export async function startBot() {
                 debounceMs: DEBOUNCE_MS
               });
             } else {
+              if (msgId) LeadDB.markMessageProcessed(msgId);
               LeadDB.addMessage(senderJid, 'user', '[Voice Note]', { waMsgId: msgId, mediaType: 'audio' });
               await sendSingleBubbleWithRetry({
                 jid: senderJid,
@@ -357,6 +332,8 @@ export async function startBot() {
 
         // 3b. Image or PDF Document Upload
         if (msg.message.imageMessage || msg.message.documentMessage) {
+          if (msgId && LeadDB.isMessageProcessed(msgId)) continue;
+          if (msgId) LeadDB.markMessageProcessed(msgId);
           try {
             const isDoc = Boolean(msg.message.documentMessage);
             const mime = (isDoc ? msg.message.documentMessage.mimetype : msg.message.imageMessage.mimetype) || '';
@@ -404,18 +381,20 @@ export async function startBot() {
           continue;
         }
 
-        // 3c. Sticker or unsupported message without text
+        // 3c. Sticker
         if (msg.message.stickerMessage && !textContent) {
+          if (msgId) LeadDB.markMessageProcessed(msgId);
           LeadDB.addMessage(senderJid, 'user', '[Sticker]', { waMsgId: msgId, mediaType: 'sticker' });
           continue;
         }
 
         if (!textContent) continue;
 
-        // 4. Standard Text Message -> Enqueue into Debounced Conversation Controller
-        await enqueueIncomingUserMessage({
+        // 4. Unified Ingestion Pipeline (7s Debounce + Per-User TurnSeq Lock)
+        await handleIncomingMessage({
           phone: senderJid,
           text: textContent,
+          source: 'baileys',
           msgKey: msg.key,
           rawProto: msg.message,
           getSock,
@@ -430,11 +409,7 @@ export async function startBot() {
   }
 }
 
-// ============================================================
-// ⏰ PERSISTENT CRON SCHEDULERS (Started Once at Boot)
-// ============================================================
 function startBackgroundJobs() {
-  // 1. Follow-up & Ghost Detection Tick every 5 minutes
   setInterval(async () => {
     try {
       await runGhostAndFollowUpTick({
@@ -448,13 +423,11 @@ function startBackgroundJobs() {
     }
   }, 5 * MINUTE);
 
-  // 2. 9 PM IST Daily Summary Report + Daily DB Backup + 5-Minute Business Hours Health Watchdog
   setInterval(async () => {
     const now = Date.now();
     const ist = getISTParts(now);
     const dateKey = `${ist.year}-${ist.month}-${ist.day}`;
 
-    // 9:00 PM IST Daily Report & Backup
     if (ist.hour === 21 && ist.minute < 5 && lastDailyReportDateIST !== dateKey) {
       lastDailyReportDateIST = dateKey;
       LeadDB.createBackup();
@@ -462,17 +435,34 @@ function startBackgroundJobs() {
       await sendRawWhatsAppMessage(OWNER_NUMBER, reportText);
     }
 
-    // Health Watchdog: if socket is disconnected for > 5 min during business hours
     if (connectionStatus !== 'CONNECTED' && isBusinessHoursIST(now) && (now - lastDisconnectedAt) > 5 * MINUTE) {
       console.error(`🚨 HEALTH WATCHDOG: WhatsApp socket has been ${connectionStatus} for > 5 minutes during business hours!`);
     }
   }, 1 * MINUTE);
 }
 
-// ============================================================
-// 🚀 BOOTSTRAP CRM SERVER & BOT
-// ============================================================
+// Section 3.4: Graceful SIGTERM / SIGINT shutdown for Render redeploy
+function setupGracefulShutdown() {
+  const shutdown = (signal) => {
+    console.log(`\n🛑 Received ${signal}. Flushing SQLite WAL and closing Baileys socket cleanly...`);
+    try {
+      if (activeSock) {
+        activeSock.ev.removeAllListeners();
+        activeSock.ws?.close();
+      }
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      db.close();
+    } catch (e) {
+      console.warn('⚠️ Shutdown warning:', e.message);
+    }
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}
+
 if (process.env.NODE_ENV !== 'test') {
+  setupGracefulShutdown();
   console.log('🔄 Starting College Vidya Counselor Bot & CRM...');
   startCrmServer({
     getSock,
