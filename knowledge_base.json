@@ -1,0 +1,305 @@
+{
+  "last_verified_date": "2026-11-20",
+  "verification_portals": {
+    "ugc_universities": "https://www.ugc.ac.in",
+    "ugc_fake_list": "https://www.ugc.ac.in/page/Fake-Universities.aspx",
+    "aicte_approved": "https://facilities.aicte-india.org",
+    "aiu_members": "https://www.aiu.ac.in",
+    "naac_grades": "https://www.naac.gov.in",
+    "nirf_rankings": "https://www.nirfindia.org"
+  },
+  "universities": [
+    {
+      "id": "sanskriti",
+      "name": "Sanskriti University",
+      "short_name": "Sanskriti",
+      "city": "Mathura, Uttar Pradesh",
+      "status": "State Private University (UP Act No. 20 of 2016)",
+      "approvals": {
+        "ugc_2f": true,
+        "ugc_12b": false,
+        "aicte_approved": false,
+        "aiu_member": true,
+        "naac_grade": "B++ (CGPA 2.95)",
+        "nirf_rank": "101-150 (Innovation)"
+      },
+      "programs": [
+        {
+          "code": "BTECH_LE",
+          "name": "B.Tech Lateral Entry for Working Professionals",
+          "duration_years": 3,
+          "semesters": 6,
+          "branches": ["CSE", "Mechanical", "Civil", "Electrical", "ECE"],
+          "fee_per_sem_min": 45000,
+          "fee_per_sem_max": 50000,
+          "min_percentage_gen": 45,
+          "min_percentage_reserved": 40,
+          "required_qualification": ["DIPLOMA", "BSC_MATHS"]
+        },
+        {
+          "code": "MTECH_WP",
+          "name": "M.Tech for Working Professionals",
+          "duration_years": 2,
+          "semesters": 4,
+          "branches": ["CSE", "Mechanical", "Civil", "Electrical", "ECE"],
+          "fee_per_sem_min": 45000,
+          "fee_per_sem_max": 50000,
+          "min_percentage_gen": 50,
+          "min_percentage_reserved": 45,
+          "required_qualification": ["BTECH"]
+        }
+      ],
+      "allowed_employment_types": ["PRIVATE"],
+      "requires_employment": true,
+      "min_experience_years": 1,
+      "geo_rule": {
+        "type": "pan_india",
+        "values": ["ALL"]
+      },
+      "mode": "Weekend / Evening Flexible Shift (Regular Degree Mode, NOT Online/Distance)",
+      "official_website": "https://www.sanskriti.edu.in",
+      "installment_available": true,
+      "best_for": "budget",
+      "usp_points": [
+        "Most affordable fee structure (~₹45,000–50,000/semester)",
+        "UGC Section 2(f) recognized State Private University with NAAC B++ (2.95 CGPA) and AIU membership",
+        "Pan-India eligibility for private-sector diploma holders",
+        "Weekend/flexible timing classes designed for working professionals",
+        "100% direct fee payment on official university portal"
+      ],
+      "compliance_notes": "NEVER claim Sanskriti is AICTE approved (aicte_approved is false). Explain honestly: it is a UGC 2(f) recognized State University established under the UP State Private Universities Act, 2016; State universities have degree-awarding authority under their own statute. Students can verify on ugc.ac.in. If a student specifically requires AICTE approval, recommend Kalinga (private job) or Lingaya's (Govt/PSU within 75 km)."
+    },
+    {
+      "id": "kalinga",
+      "name": "Kalinga University",
+      "short_name": "Kalinga",
+      "city": "Naya Raipur, Chhattisgarh",
+      "status": "State Private University (CG Act No. 8 of 2011)",
+      "approvals": {
+        "ugc_2f": true,
+        "ugc_12b": true,
+        "aicte_approved": true,
+        "aiu_member": true,
+        "naac_grade": "B+ (CGPA 2.60)",
+        "nirf_rank": "101-150 (University Category)"
+      },
+      "programs": [
+        {
+          "code": "BTECH_LE",
+          "name": "B.Tech Lateral Entry for Working Professionals",
+          "duration_years": 3,
+          "semesters": 6,
+          "branches": ["CSE", "Mechanical", "Civil", "Electrical", "Mining"],
+          "fee_per_sem_min": 50000,
+          "fee_per_sem_max": 55000,
+          "min_percentage_gen": 45,
+          "min_percentage_reserved": 40,
+          "required_qualification": ["DIPLOMA", "BSC_MATHS"]
+        },
+        {
+          "code": "MTECH_WP",
+          "name": "M.Tech for Working Professionals",
+          "duration_years": 2,
+          "semesters": 4,
+          "branches": ["CSE", "Mechanical", "Civil", "Electrical"],
+          "fee_per_sem_min": 50000,
+          "fee_per_sem_max": 55000,
+          "min_percentage_gen": 50,
+          "min_percentage_reserved": 45,
+          "required_qualification": ["BTECH"]
+        }
+      ],
+      "allowed_employment_types": ["PRIVATE"],
+      "requires_employment": true,
+      "min_experience_years": 1,
+      "geo_rule": {
+        "type": "pan_india",
+        "values": ["ALL"],
+        "previous_states": ["Delhi", "NCR", "Haryana", "Uttar Pradesh", "Chhattisgarh", "Madhya Pradesh", "Maharashtra", "Karnataka", "Telangana", "Andhra Pradesh", "Odisha", "Jharkhand"]
+      },
+      "mode": "Weekend / Evening Flexible Timing (Regular Mode, NOT Online/Distance)",
+      "official_website": "https://www.kalingauniversity.ac.in",
+      "installment_available": true,
+      "best_for": "AICTE needed",
+      "usp_points": [
+        "Directly AICTE Approved Faculty of Technology + rare UGC Section 12(B) & 2(f) recognition",
+        "Consistently ranked in NIRF Top 101–150 University band & NAAC B+ accredited",
+        "Pan-India eligibility for private-sector working professionals",
+        "Moderate fee (~₹50,000–55,000/semester) with official portal payment"
+      ],
+      "compliance_notes": "Directly AICTE approved and UGC 2(f) + 12(B) recognized. Pan-India for private sector employees. (previous_states preserved in config in case geo policy changes back)."
+    },
+    {
+      "id": "lingayas",
+      "name": "Lingaya's Vidyapeeth",
+      "short_name": "Lingaya's",
+      "city": "Faridabad, Haryana (Delhi-NCR)",
+      "status": "Deemed-to-be University (UGC Section 3, MHRD Notification 2009)",
+      "approvals": {
+        "ugc_2f": true,
+        "ugc_12b": false,
+        "ugc_sec3_deemed": true,
+        "aicte_approved": true,
+        "aiu_member": true,
+        "naac_grade": "A+",
+        "nirf_rank": "Participated (Historical 151-200)"
+      },
+      "programs": [
+        {
+          "code": "BTECH_LE",
+          "name": "B.Tech Lateral Entry for Working Professionals",
+          "duration_years": 3,
+          "semesters": 6,
+          "branches": ["CSE", "Mechanical", "Civil", "ECE", "Electrical"],
+          "fee_per_sem_min": 50000,
+          "fee_per_sem_max": 60000,
+          "min_percentage_gen": 50,
+          "min_percentage_reserved": 50,
+          "required_qualification": ["DIPLOMA", "BSC_MATHS"]
+        },
+        {
+          "code": "MTECH_WP",
+          "name": "M.Tech for Working Professionals",
+          "duration_years": 2,
+          "semesters": 4,
+          "branches": ["CSE", "Mechanical", "Civil", "ECE"],
+          "fee_per_sem_min": 50000,
+          "fee_per_sem_max": 60000,
+          "min_percentage_gen": 50,
+          "min_percentage_reserved": 50,
+          "required_qualification": ["BTECH"]
+        }
+      ],
+      "allowed_employment_types": ["GOVT", "PSU", "PRIVATE"],
+      "requires_employment": true,
+      "min_experience_years": 1,
+      "geo_rule": {
+        "type": "radius_km",
+        "center_city": "Faridabad",
+        "radius_km": 75,
+        "allowed_ncr_cities": ["faridabad", "delhi", "new delhi", "noida", "greater noida", "gurgaon", "gurugram", "ghaziabad", "palwal", "ballabhgarh", "sonipat", "bahadurgarh", "ncr", "delhi ncr"]
+      },
+      "mode": "Weekend / Evening Flexible Shift (AICTE Working Professional Norms)",
+      "official_website": "https://www.lingayasvidyapeeth.edu.in",
+      "installment_available": true,
+      "best_for": "govt employee",
+      "usp_points": [
+        "ONLY partnered option eligible for Government & PSU employees (also open to Private)",
+        "Highest NAAC A+ accreditation & UGC Section 3 Deemed-to-be University",
+        "Directly AICTE Approved for Working Professionals",
+        "Ideal for professionals residing or working within 75 km of Faridabad (Delhi-NCR)"
+      ],
+      "compliance_notes": "Strict flat 50% minimum requirement (no reserved category relaxation below 50%) and strict 75 km radius from Faridabad (Delhi-NCR). Govt/PSU employees outside 75 km CANNOT be enrolled here."
+    },
+    {
+      "id": "cv_online_partners",
+      "name": "College Vidya Online University Partners (Manipal, Amity, Uttaranchal, D.Y. Patil)",
+      "short_name": "CV Online Partners",
+      "city": "Pan-India (100% Online)",
+      "status": "UGC-DEB Entitled & NAAC A+ / A++ Universities",
+      "approvals": {
+        "ugc_deb": true,
+        "ugc_2f": true,
+        "aicte_approved": true,
+        "aiu_member": true,
+        "naac_grade": "A+ / A++"
+      },
+      "programs": [
+        {
+          "code": "ONLINE_BCA",
+          "name": "Online BCA (Bachelor of Computer Applications)",
+          "duration_years": 3,
+          "semesters": 6,
+          "fee_per_sem_min": 15000,
+          "fee_per_sem_max": 25000,
+          "min_percentage_gen": 45,
+          "min_percentage_reserved": 40,
+          "required_qualification": ["12TH_SCIENCE", "12TH_COMMERCE", "12TH_ARTS", "12TH", "DIPLOMA"]
+        },
+        {
+          "code": "ONLINE_BBA",
+          "name": "Online BBA (Bachelor of Business Administration)",
+          "duration_years": 3,
+          "semesters": 6,
+          "fee_per_sem_min": 15000,
+          "fee_per_sem_max": 25000,
+          "min_percentage_gen": 45,
+          "min_percentage_reserved": 40,
+          "required_qualification": ["12TH_SCIENCE", "12TH_COMMERCE", "12TH_ARTS", "12TH", "DIPLOMA"]
+        },
+        {
+          "code": "ONLINE_BCOM",
+          "name": "Online B.Com",
+          "duration_years": 3,
+          "semesters": 6,
+          "fee_per_sem_min": 12000,
+          "fee_per_sem_max": 20000,
+          "min_percentage_gen": 45,
+          "min_percentage_reserved": 40,
+          "required_qualification": ["12TH_COMMERCE", "12TH_SCIENCE", "12TH_ARTS", "12TH"]
+        },
+        {
+          "code": "ONLINE_MCA",
+          "name": "Online MCA (Master of Computer Applications)",
+          "duration_years": 2,
+          "semesters": 4,
+          "fee_per_sem_min": 25000,
+          "fee_per_sem_max": 40000,
+          "min_percentage_gen": 50,
+          "min_percentage_reserved": 45,
+          "required_qualification": ["OTHER_GRAD", "BTECH", "BSC_MATHS"]
+        },
+        {
+          "code": "ONLINE_MBA",
+          "name": "Online MBA / Executive MBA",
+          "duration_years": 2,
+          "semesters": 4,
+          "fee_per_sem_min": 25000,
+          "fee_per_sem_max": 45000,
+          "min_percentage_gen": 50,
+          "min_percentage_reserved": 45,
+          "required_qualification": ["OTHER_GRAD", "BTECH", "PG"]
+        }
+      ],
+      "allowed_employment_types": ["PRIVATE", "GOVT", "PSU", "UNEMPLOYED"],
+      "requires_employment": false,
+      "min_experience_years": 0,
+      "geo_rule": {
+        "type": "pan_india",
+        "values": ["ALL"]
+      },
+      "mode": "100% Online (UGC-DEB Approved, Live + Recorded Lectures, Online Proctored Exams)",
+      "official_website": "https://collegevidya.com",
+      "installment_available": true,
+      "best_for": "12th pass & graduates looking for UGC-DEB online degrees",
+      "usp_points": [
+        "100% Legal & UGC-DEB Entitled Online Degrees for 12th pass and Graduates",
+        "NAAC A+ and A++ Top Universities (Manipal, Amity, Uttaranchal, etc.)",
+        "Very affordable (~₹15,000–25,000/semester for UG; ~₹25,000–45,000/semester for PG)",
+        "No daily commute — study alongside any private or government job"
+      ],
+      "compliance_notes": "Best legal alternative for 12th pass students (since 12th pass cannot do working-professional B.Tech) and for non-engineering graduates seeking MCA/MBA."
+    }
+  ],
+  "documents_checklist": {
+    "BTECH_LE": [
+      "10th Marksheet & Certificate",
+      "3-Year Polytechnic Diploma (All Semester Marksheets + Provisional/Degree Certificate)",
+      "Aadhaar Card (Front & Back)",
+      "Passport Size Photo",
+      "Work Experience Certificate / Appointment Letter + Latest Salary Slip / Company ID"
+    ],
+    "MTECH_WP": [
+      "10th & 12th/Diploma Marksheets",
+      "B.Tech / B.E. All Semester Marksheets & Degree Certificate",
+      "Aadhaar Card",
+      "Passport Size Photo",
+      "Work Experience Certificate / Company ID"
+    ],
+    "ONLINE_UG_PG": [
+      "10th & 12th Marksheets (plus Graduation marksheets for MCA/MBA)",
+      "Aadhaar Card",
+      "Passport Size Photo"
+    ]
+  }
+}
