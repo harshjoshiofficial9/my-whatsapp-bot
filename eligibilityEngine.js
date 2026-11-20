@@ -90,9 +90,9 @@ export function inferFromUserText(text, currentProfile = {}) {
     asks_if_ai_bot: false
   };
 
-  // 1. OPT_OUT_OR_EXIT check (catches "Mujhe kuch nahi chahiye thankyou!!", "STOP", "not interested", "mat bhejo", "wrong number")
+  // 1. OPT_OUT_OR_EXIT check (catches "Mujhe kuch nahi chahiye thankyou!!", "STOP", "not interested", "mat bhejo", "wrong number", "thik h bye")
   if (
-    /^(stop|unsubscribe|quit|cancel|bye|goodbye)$/i.test(raw) ||
+    /^(stop|unsubscribe|quit|cancel|bye|goodbye|thik\s*h\s*bye|theek\s*hai\s*bye|ok\s*bye)$/i.test(raw) ||
     /\b(kuch\s*nahi\s*chahiye|kuch\s*nhi\s*chahiye|nahi\s*chahiye\s*thank|mat\s*bhejo|msg\s*mat\s*karo|message\s*mat\s*karo|not\s*interested|interested\s*nahi|no\s*more\s*messages|dont\s*message|don't\s*message|wrong\s*number|galat\s*number|koi\s*requirement\s*nahi)\b/i.test(lower)
   ) {
     updates.opted_out = true;
@@ -104,9 +104,17 @@ export function inferFromUserText(text, currentProfile = {}) {
     return { updates, meta };
   }
 
-  // 2. PURE GREETING check ("Hello", "Hyy", "Hi", "Hello\nHyy", "Namaste")
+  // Re-engage lead automatically if they previously said "bye" / opted out and are now messaging again!
+  if (currentProfile.opted_out) {
+    updates.opted_out = false;
+    if (currentProfile.stage === 'OPTED_OUT') {
+      updates.stage = currentProfile.qualification ? 'QUALIFYING' : 'ENGAGED';
+    }
+  }
+
+  // 2. PURE GREETING check ("Hello", "Hyy", "Hy", "Hi", "Hello\nHyy", "Namaste")
   const strippedGreeting = lower.replace(/[\s!.,?]+/g, ' ').trim();
-  if (/^(hi+|hello+|hyy+|hey+|hlo+|namaste|namaskar|good\s*morning|good\s*evening|good\s*afternoon|ram\s*ram|salaam)(\s+(hi+|hello+|hyy+|hey+|hlo+|sir|bhai|ji|harsh))*$/i.test(strippedGreeting)) {
+  if (/^(hi+|hello+|hy+|hey+|hlo+|hlw+|namaste|namaskar|good\s*morning|good\s*evening|good\s*afternoon|ram\s*ram|salaam)(\s+(hi+|hello+|hy+|hey+|hlo+|hlw+|sir|bhai|ji|harsh))*$/i.test(strippedGreeting)) {
     meta.detected_intent = 'GREETING_ONLY';
     meta.conversation_mood = 'neutral';
     meta.intents.push('greeting');
@@ -119,18 +127,22 @@ export function inferFromUserText(text, currentProfile = {}) {
     meta.asks_if_ai_bot = true;
     meta.conversation_mood = 'curious';
     meta.intents.push('identity_check');
-  } else if (/\b(kaun\s*ho\s*tum|ho\s*kaun\s*tum|tum\s*kaun\s*ho|aap\s*kaun|who\s*are\s*you|ye\s*s[ab]+\s*ky?u+\s*puch|kyu\s*puch\s*rahe|number\s*kaha[n]?\s*se\s*mila|kisne\s*diya\s*number)\b/i.test(lower)) {
+  } else if (/\b(kaun\s*ho\s*tum|ho\s*kaun\s*tum|tum\s*kaun\s*ho|aap\s*kaun|who\s*are\s*you|ye\s*s[ab]+\s*ky?u+\s*puch|number\s*kaha[n]?\s*se\s*mila|kisne\s*diya\s*number)\b/i.test(lower) && !/\b(kaha[n]?\s*se\s*karu|konsi\s*university)\b/i.test(lower)) {
     meta.detected_intent = 'IDENTITY_CHECK';
     meta.conversation_mood = 'skeptical';
     updates.conversation_mood = 'skeptical';
     meta.intents.push('identity_check');
   }
 
-  // 4. CONFUSION_OR_GLITCH ("Arre ky hogya?", "kya ho gaya", "repeat kyu kar rahe ho", "double message")
-  if (/\b(arre\s*ky[a]?\s*ho\s*g[ay]+a|kya\s*ho\s*gaya|ky\s*hogya|repeat\s*kyu|baar\s*baar\s*same|double\s*msg|glitch)\b/i.test(lower)) {
+  // 4. CONFUSION_OR_GLITCH ("Arre ky hogya?", "Mtlb", "Arre konsi detils?", "kya ho gaya", "repeat kyu kar rahe ho")
+  if (
+    /^(mtlb\??|matlab\??|kya\s*matlab\??|samjha\s*nahi\??|samajh\s*nhi\s*aaya\??)$/i.test(raw) ||
+    /\b(arre\s*ky[a]?\s*ho\s*g[ay]+a|kya\s*ho\s*gaya|ky\s*hogya|konsi\s*det[a]?ils|kaunsi\s*details|repeat\s*kyu|baar\s*baar\s*same|double\s*msg|glitch)\b/i.test(lower)
+  ) {
     meta.detected_intent = 'CONFUSION_OR_GLITCH';
-    meta.conversation_mood = 'annoyed';
-    updates.conversation_mood = 'annoyed';
+    meta.conversation_mood = 'confused';
+    updates.conversation_mood = 'confused';
+    meta.stop_probing = true;
     meta.intents.push('confusion');
   }
 
@@ -219,9 +231,12 @@ export function inferFromUserText(text, currentProfile = {}) {
   } else if (/\b(private|pvt|mnc|l&t|tcs|infosys|wipro|hcl|tech\s*mahindra|tata|maruti|hero|honda|auto\s*parts|bosch|siemens|abb|jindal|adani|reliance|firm|factory|plant|production\s*job|contractor|company\s*me|company\s*mein|working\s*in\s*a\s*bank|bank)\b/i.test(lower)) {
     updates.employed = true;
     updates.employment_type = 'PRIVATE';
-  } else if (/\b(job\s*ke\s*sath|job\s*ke\s*saath|working|job\s*karta|job\s*krta|job\s*kar\s*raha|job\s*kr\s*rha|naukri)\b/i.test(lower)) {
-    if (currentProfile.employed === null || currentProfile.employed === undefined) {
-      updates.employed = true;
+  } else if (/\b(job\s*ke\s*sath|job\s*ke\s*saath|working|job\s*karta|job\s*krta|job\s*kar\s*raha|job\s*kr\s*rha|full\s*time\s*job|naukri|morning\s*\d+\s*se|shift\s*me|office\s*job|site\s*job)\b/i.test(lower)) {
+    updates.employed = true;
+    // Default unspecified job to PRIVATE so we never trap the student in an infinite "employment_type" loop!
+    // (If they later mention Govt/PSU/Railway, the GOVT/PSU branch above overrides this automatically.)
+    if (!currentProfile.employment_type && !updates.employment_type) {
+      updates.employment_type = 'PRIVATE';
     }
   }
 
@@ -305,6 +320,33 @@ export function inferFromUserText(text, currentProfile = {}) {
 
   // 13. Primary Intent Refinement (if not already overridden by GREETING / IDENTITY / CONFUSION / REJECTION / OPT_OUT)
   const isSpecialIntent = new Set(['GREETING_ONLY', 'IDENTITY_CHECK', 'CONFUSION_OR_GLITCH', 'COURSE_REJECTION', 'OPT_OUT_OR_EXIT', 'ANGRY_OR_FRUSTRATED']).has(meta.detected_intent);
+
+  // Student impatiently asking for direct recommendation ("Itna sb ku puch rahe ho kaha se karu batao", "kaha se karu", "konsi university")
+  if (/\b(itna\s*s[ab]+\s*ky?u+\s*puch|kaha[n]?\s*se\s*k[ar]+u|konsi\s*university\s*se|best\s*university\s*batao|seedha\s*batao)\b/i.test(lower)) {
+    meta.intents.push('direct_recommendation_request');
+    meta.stop_probing = true;
+    meta.conversation_mood = 'frustrated';
+    updates.conversation_mood = 'frustrated';
+    if (!isSpecialIntent) meta.detected_intent = 'COMPARISON_REQUEST';
+  }
+
+  // Student doubting B.Tech value or asking B.Tech vs B.E. / M.Tech vs MBA
+  if (/\b(koi\s*fayda\s*n[ah]*i|fayda\s*nahi|kya\s*fayda|b\.?e\s*ky?u+\s*na|b\.?tech\s*ky?u+\s*k[ar]+u|b\.?tech\s*(vs|aur|or)\s*b\.?e\b)\b/i.test(lower)) {
+    meta.intents.push('career_scope_query');
+    meta.stop_probing = true;
+    if (!isSpecialIntent) meta.detected_intent = 'CAREER_CONFUSION_OR_ROADMAP';
+  }
+
+  // Student asking duration / "Kitna time?" / "M btech kr sakta hu"
+  if (/\b(kitna\s*time|kitne\s*saal|duration\s*kya|kitne\s*year|time\s*lagega)\b/i.test(lower)) {
+    meta.intents.push('duration_query');
+    meta.stop_probing = true;
+    if (!isSpecialIntent) meta.detected_intent = 'DURATION_OR_LATERAL_QUERY';
+  }
+  if (/\b(m\s*b\.?tech\s*k[ar]+\s*sakta|main\s*b\.?tech\s*k[ar]+\s*sakta|b\.?tech\s*ho\s*jayega|eligible\s*hu\s*kya)\b/i.test(lower)) {
+    meta.intents.push('eligibility_check');
+    if (!isSpecialIntent) meta.detected_intent = 'ELIGIBILITY_CHECK';
+  }
 
   if (/\b(sanskriti\s*ya\s*kalinga|kalinga\s*ya\s*sanskriti|m\.?tech\s*karu[n]?\s*ya\s*mba|mba\s*ya\s*m\.?tech|kaunsi\s*best|kaunsa\s*best|kaunsi\s*better|kaunsa\s*acha|compare|comparison|difference|dono\s*me\s*se)\b/i.test(lower)) {
     meta.intents.push('comparison_query');
@@ -400,7 +442,7 @@ export function evaluateEligibility(lead, kb, meta = {}) {
     'OPT_OUT_OR_EXIT',
     'ANGRY_OR_FRUSTRATED'
   ]);
-  const suppressProbing = noProbeIntents.has(meta.detected_intent);
+  const suppressProbing = noProbeIntents.has(meta.detected_intent) || Boolean(meta.stop_probing);
 
   const findUniv = (id) => (kb.universities || []).find(u => u.id === id);
   const sanskriti = findUniv('sanskriti');
@@ -427,7 +469,7 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       recommended,
       rejected,
       missing_info,
-      next_missing_field: suppressProbing ? null : 'qualification',
+      next_missing_field: suppressProbing ? null : 'Ask student qualification naturally (12th pass, 3-yr Polytechnic Diploma, or Graduation — NEVER write variable names in brackets)',
       already_known_fields
     };
   }
@@ -576,38 +618,44 @@ export function evaluateEligibility(lead, kb, meta = {}) {
     };
   }
 
-  // Need employment_type (PRIVATE vs GOVT/PSU)
+  const kalingaRec = {
+    university: kalinga?.name || 'Kalinga University, Naya Raipur',
+    short_name: 'Kalinga University',
+    program: targetProgLabel,
+    fee_range: '₹50,000–55,000/semester',
+    mode: kalinga?.mode || 'Weekend / Flexible Timing',
+    approvals: 'Directly AICTE Approved + UGC 2(f) & 12(B) + NIRF 101-150 + NAAC B+',
+    why: 'Direct AICTE approval, UGC 12(B) status aur NIRF 101-150 ranking ke liye best Pan-India choice.'
+  };
+
+  const sanskritiRec = {
+    university: sanskriti?.name || 'Sanskriti University, Mathura',
+    short_name: 'Sanskriti University',
+    program: targetProgLabel,
+    fee_range: '₹45,000–50,000/semester',
+    mode: sanskriti?.mode || 'Weekend / Flexible Shift',
+    approvals: 'UGC 2(f) Recognized State Private University + NAAC B++ (2.95 CGPA) + AIU Member (Not AICTE approved; operates under UP State Act 2016)',
+    why: 'Budget-friendly (~₹45k–50k/sem), NAAC B++ grade aur Pan-India flexible weekend batch ke liye best.'
+  };
+
+  // Need employment_type (PRIVATE vs GOVT/PSU) — only when student hasn't mentioned having a job yet
   if (!empType) {
-    missing_info.push('employment_type');
+    missing_info.push('job_status_and_sector');
     return {
       decision_status: 'NEED_INFO',
       eligible_programs: [targetProgLabel, alternativeTrackLabel],
-      recommended: [],
+      recommended: needsAicte ? [kalingaRec] : [sanskritiRec, kalingaRec],
       rejected: [],
       missing_info,
-      next_missing_field: suppressProbing ? null : 'employment_type',
+      next_missing_field: suppressProbing ? null : 'Ask naturally if they are currently doing a job (Private company or Govt/PSU) — NEVER ask full-time vs part-time or shift timings, and NEVER write "(employment type)" in brackets',
       already_known_fields
     };
   }
 
-  // Need percentage
-  if (pct === null) {
-    missing_info.push('percentage');
-    return {
-      decision_status: 'NEED_INFO',
-      eligible_programs: [targetProgLabel, alternativeTrackLabel],
-      recommended: [],
-      rejected: [],
-      missing_info,
-      next_missing_field: suppressProbing ? null : 'percentage',
-      already_known_fields
-    };
-  }
-
-  // SUBCASE C1: PRIVATE SECTOR EMPLOYEE
+  // SUBCASE C1: PRIVATE SECTOR EMPLOYEE (includes when pct is not yet stated — recommend Sanskriti & Kalinga immediately!)
   if (empType === 'PRIVATE') {
     const minReq = category === 'RESERVED' ? 40 : 45;
-    if (pct < 40) {
+    if (pct !== null && pct < 40) {
       rejected.push({
         program: targetProgLabel,
         reason: `Minimum aggregate required is 45% (40% for reserved category). Student has ${pct}%.`
@@ -625,20 +673,20 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       };
     }
 
-    if (pct >= 40 && pct < 45 && !lead.category) {
+    if (pct !== null && pct >= 40 && pct < 45 && !lead.category) {
       missing_info.push('category');
       return {
         decision_status: 'NEED_INFO',
         eligible_programs: [targetProgLabel, alternativeTrackLabel],
-        recommended: [],
+        recommended: needsAicte ? [kalingaRec] : [sanskritiRec, kalingaRec],
         rejected: [],
         missing_info,
-        next_missing_field: suppressProbing ? null : 'category',
+        next_missing_field: suppressProbing ? null : 'Ask naturally whether they belong to General or Reserved (OBC/SC/ST) category since 40-44% requires Reserved category',
         already_known_fields
       };
     }
 
-    if (pct < minReq) {
+    if (pct !== null && pct < minReq) {
       rejected.push({
         program: targetProgLabel,
         reason: `General category requires minimum 45% in Diploma (you have ${pct}%).`
@@ -659,26 +707,6 @@ export function evaluateEligibility(lead, kb, meta = {}) {
     // Eligible for Private Sector B.Tech LE / M.Tech WP + Alternative Track!
     eligible_programs.push(targetProgLabel, alternativeTrackLabel);
 
-    const kalingaRec = {
-      university: kalinga?.name || 'Kalinga University, Naya Raipur',
-      short_name: 'Kalinga University',
-      program: targetProgLabel,
-      fee_range: '₹50,000–55,000/semester',
-      mode: kalinga?.mode || 'Weekend / Flexible Timing',
-      approvals: 'Directly AICTE Approved + UGC 2(f) & 12(B) + NIRF 101-150 + NAAC B+',
-      why: 'Direct AICTE approval, UGC 12(B) status aur NIRF 101-150 ranking ke liye best Pan-India choice.'
-    };
-
-    const sanskritiRec = {
-      university: sanskriti?.name || 'Sanskriti University, Mathura',
-      short_name: 'Sanskriti University',
-      program: targetProgLabel,
-      fee_range: '₹45,000–50,000/semester',
-      mode: sanskriti?.mode || 'Weekend / Flexible Shift',
-      approvals: 'UGC 2(f) Recognized State Private University + NAAC B++ (2.95 CGPA) + AIU Member (Not AICTE approved; operates under UP State Act 2016)',
-      why: 'Budget-friendly (~₹45k–50k/sem), NAAC B++ grade aur Pan-India flexible weekend batch ke liye best.'
-    };
-
     if (needsAicte) {
       recommended.push(kalingaRec);
       rejected.push({
@@ -689,7 +717,16 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       recommended.push(sanskritiRec, kalingaRec);
     }
 
-    if (!lead.goal) missing_info.push('goal');
+    let nextProbe = null;
+    if (!suppressProbing) {
+      if (pct === null) {
+        missing_info.push('percentage');
+        nextProbe = 'Present Sanskriti & Kalinga University options with fees & 3-year duration first, then ask if they have 45%+ marks in Diploma (or whether they prefer lower budget vs AICTE approval)';
+      } else if (!lead.goal) {
+        missing_info.push('priority_budget_or_aicte');
+        nextProbe = 'Ask whether their priority is lower budget (Sanskriti ~₹45k-50k/sem) or Direct AICTE approval (Kalinga ~₹50k-55k/sem)';
+      }
+    }
 
     return {
       decision_status: 'ELIGIBLE',
@@ -697,14 +734,29 @@ export function evaluateEligibility(lead, kb, meta = {}) {
       recommended,
       rejected,
       missing_info,
-      next_missing_field: suppressProbing ? null : (!lead.goal ? 'priority_budget_or_aicte' : null),
+      next_missing_field: nextProbe,
       already_known_fields
     };
   }
 
   // SUBCASE C2: GOVT / PSU EMPLOYEE
   if (empType === 'GOVT' || empType === 'PSU') {
-    if (pct < 50) {
+    if (pct === null && !lead.city) {
+      missing_info.push('city_and_percentage');
+      return {
+        decision_status: 'NEED_INFO',
+        eligible_programs: [targetProgLabel, alternativeTrackLabel],
+        recommended: [],
+        rejected: [
+          { program: 'Sanskriti University', reason: 'Private-sector employees only.' },
+          { program: 'Kalinga University', reason: 'Private-sector employees only.' }
+        ],
+        missing_info,
+        next_missing_field: suppressProbing ? null : "Ask which city they are posted in (for Lingaya's 75km Delhi-NCR rule) and whether their Diploma marks are 50%+",
+        already_known_fields
+      };
+    }
+    if (pct !== null && pct < 50) {
       rejected.push(
         {
           program: "Lingaya's Vidyapeeth B.Tech / M.Tech",

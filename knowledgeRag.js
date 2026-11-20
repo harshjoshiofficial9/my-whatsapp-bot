@@ -198,69 +198,84 @@ export const KnowledgeRAG = {
    * Returns top 2 chunks hard-capped at <= 480 tokens total!
    * Skips retrieval on pure greetings, simple acks, confusion, identity questions, or opt-outs.
    */
-  retrieveTopChunks({ userText = '', lead = {}, detectedIntent = null, topK = 2, maxTokens = 480 }) {
+  retrieveTopChunks({ userText = '', lead = {}, detectedIntent = null, topK = 2, maxTokens = 450 }) {
     const raw = String(userText || '').trim();
     const lower = raw.toLowerCase();
 
-    // Skip retrieval on pure greeting, short ack, identity check, confusion, or opt-out
+    // 1. Skip retrieval on pure greeting, short ack, identity check, confusion, or opt-out
     const skipIntents = new Set(['GREETING_ONLY', 'IDENTITY_CHECK', 'CONFUSION_OR_GLITCH', 'OPT_OUT_OR_EXIT']);
     if (skipIntents.has(detectedIntent)) {
       return { chunks: [], doc_ids: [], estimated_tokens: 0 };
     }
-    if (/^(hi+|hello+|hyy+|hey+|namaste|ok+|okay|acha|achha|thank\s*you|thanks|bye|stop|arre\s*ky\s*hogya\??)$/i.test(raw)) {
+    if (/^(hi+|hello+|hy+|hey+|hlo+|hlw+|namaste|namaskar|ok+|okay+|acha|achha|hmm+|haan|han|mtlb|matlab|thank\s*you|thanks|thik\s*h\s*bye|bye|stop|arre\s*ky\s*hogya\??)$/i.test(raw)) {
       return { chunks: [], doc_ids: [], estimated_tokens: 0 };
     }
 
-    // Build keyword tokens from userText + known lead profile
+    // 2. Only trigger FTS5 RAG when the user's message actually asks about career/branch/scope/benefit/alternatives/validity/custom tech
+    // Skip RAG on simple profile answers like "Btech", "Diploma civil", "Ma job karta hu", "Morning 10 se afternoon 7", "62% Pune"
+    const hasRagTrigger = /\b(fayda|benefit|future|scope|growth|promotion|ceiling|supervisor|foreman|salary|package|ctc|lpa|nahi\s*k[ar]+na|nhi\s*k[ar]+na|no\s*b\.?tech|bca|bba|b\.?e\b|m\.?tech|mba|gulf|dubai|saudi|qatar|abroad|wes|embassy|noc|psu|govt|railway|je|ae|gate|vlsi|semiconductor|chip|embedded|bim|revit|primavera|ev|cad|solidworks|ansys|plc|scada|coding|software|cyber|cloud|ai|data|mining|chemical|automobile|pixhawk|drone|uav|dgca|valid|aicte|ugc|fake|scam|roadmap|confused|confusion|switch)\b/i.test(lower);
+
+    const ragIntents = new Set([
+      'CAREER_CONFUSION_OR_ROADMAP',
+      'BRANCH_SCOPE_QUERY',
+      'COURSE_REJECTION',
+      'VALIDITY_DOUBT',
+      'COMPARISON_REQUEST'
+    ]);
+
+    if (!hasRagTrigger && !ragIntents.has(detectedIntent)) {
+      return { chunks: [], doc_ids: [], estimated_tokens: 0 };
+    }
+
+    // Build keyword tokens from userText (+ stream_branch only when RAG is triggered)
     const stopWords = new Set([
       'hai', 'hain', 'hoon', 'mein', 'main', 'aur', 'kya', 'kaise', 'karna', 'krna', 'karni', 'krni',
       'mujhe', 'mera', 'meri', 'mere', 'aap', 'tum', 'kaun', 'kyu', 'kyun', 'se', 'ke', 'ki', 'ka',
-      'ko', 'par', 'pe', 'bhi', 'toh', 'hi', 'hello', 'hyy', 'sir', 'bhai', 'ji', 'ek', 'do', 'ye',
-      'woh', 'tha', 'thi', 'the', 'abhi', 'sath', 'saath', 'liye', 'baad', 'achha', 'theek', 'batao',
-      'bataiye', 'chahiye', 'kr', 'kar', 'ho', 'hu', 'for', 'the', 'and', 'with', 'from', 'what', 'how'
+      'ko', 'par', 'pe', 'bhi', 'toh', 'hi', 'hello', 'hy', 'hyy', 'hey', 'hlo', 'sir', 'bhai', 'ji',
+      'ek', 'do', 'ye', 'woh', 'tha', 'thi', 'the', 'abhi', 'sath', 'saath', 'liye', 'baad', 'achha',
+      'theek', 'thik', 'batao', 'bataiye', 'chahiye', 'kr', 'kar', 'krru', 'karu', 'karun', 'ho', 'hu',
+      'ma', 'job', 'karta', 'raha', 'full', 'time', 'morning', 'afternoon', 'ok', 'mtlb', 'matlab',
+      'lagta', 'nhi', 'nahi', 'for', 'the', 'and', 'with', 'from', 'what', 'how'
     ]);
 
     const combinedContext = [
       raw,
-      lead.qualification || '',
-      lead.stream_branch || '',
-      lead.employment_type || '',
-      lead.goal || ''
+      lead.stream_branch || ''
     ].join(' ').toLowerCase();
 
     const rawTokens = combinedContext
       .replace(/[^a-z0-9\s]/g, ' ')
       .split(/\s+/)
-      .filter(w => w.length >= 2 && !stopWords.has(w));
+      .filter(w => w.length >= 3 && !stopWords.has(w));
 
     // Add domain synonym expansions for accurate FTS5 matching
     const expanded = new Set(rawTokens);
-    if (/\b(fayda|future|scope|growth|promotion|ceiling|supervisor|foreman)\b/i.test(lower) && /\b(diploma|polytechnic|btech)\b/i.test(combinedContext)) {
+    if (/\b(fayda|future|scope|growth|promotion|ceiling|supervisor|foreman)\b/i.test(lower)) {
       expanded.add('ceiling');
       expanded.add('supervisor');
       expanded.add('promotion');
     }
-    if (/\b(nahi\s*krna\s*btech|no\s*btech|skip\s*btech|bca|bba)\b/i.test(lower)) {
+    if (/\b(nahi\s*k[ar]+na\s*b\.?tech|nhi\s*k[ar]+na\s*b\.?tech|no\s*b\.?tech|skip\s*b\.?tech|bca|bba)\b/i.test(lower)) {
       expanded.add('bca');
       expanded.add('bba');
       expanded.add('alternatives');
     }
-    if (/\b(gulf|dubai|saudi|qatar|abroad|noc|psu|railway|je|ae)\b/i.test(combinedContext)) {
+    if (/\b(gulf|dubai|saudi|qatar|abroad|noc|psu|railway|je|ae)\b/i.test(lower)) {
       expanded.add('gulf');
       expanded.add('noc');
       expanded.add('psu');
     }
-    if (/\b(mtech|mba)\b/i.test(lower) && /\b(btech|be|confusion|karun|better)\b/i.test(combinedContext)) {
+    if (/\b(m\.?tech|mba)\b/i.test(lower)) {
       expanded.add('mtech');
       expanded.add('mba');
     }
 
-    const searchTerms = Array.from(expanded).slice(0, 14);
+    const searchTerms = Array.from(expanded).slice(0, 12);
     if (searchTerms.length === 0) {
       return { chunks: [], doc_ids: [], estimated_tokens: 0 };
     }
 
-    const ftsQuery = searchTerms.map(t => `"${t}"*`).join(' OR ');
+    const ftsQuery = searchTerms.map(t => (t.length >= 4 ? `"${t}"*` : `"${t}"`)).join(' OR ');
 
     let rows = [];
     try {
