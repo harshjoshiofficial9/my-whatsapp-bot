@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: college-vidya-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: OWNER_NUMBER
+        value: "917982412945"
+      - key: CRM_USERNAME
+        value: harsh
+      - key: CRM_PASSWORD
+        value: collegevidya2026
+      - key: GROQ_API_KEY
+        sync: false

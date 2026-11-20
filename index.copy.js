@@ -205,7 +205,21 @@ export async function startBot() {
         if (isLoggedOut) {
           connectionStatus = 'LOGGED_OUT';
           latestQrCode = null;
-          console.error('🚨 CRITICAL: WhatsApp session LOGGED OUT! Open CRM Dashboard to scan QR or pair via phone number.');
+          console.warn('⚠️ Previous WhatsApp session expired/logged out. Clearing stale auth credentials and generating a fresh QR Code in 3s...');
+          try {
+            const files = fs.readdirSync(STORAGE_PATHS.authDir);
+            for (const f of files) {
+              // Keep crm.db, backups, uploads if they share the directory; delete only Baileys auth JSON files
+              if (f.endsWith('.json')) {
+                fs.unlinkSync(path.join(STORAGE_PATHS.authDir, f));
+              }
+            }
+          } catch (err) {
+            console.warn('⚠️ Error clearing stale auth files:', err.message);
+          }
+          reconnectTimer = setTimeout(() => {
+            startBot();
+          }, 3000);
           return;
         }
 
